@@ -1,0 +1,537 @@
+<!doctype html><html><head><meta charset='utf-8'><title>REPORT</title><style>
+@page { size: A4; margin: 18mm 16mm; }
+* { box-sizing: border-box; }
+body { font-family: 'Segoe UI', Calibri, Arial, sans-serif; font-size: 10.5pt;
+       line-height: 1.5; color: #1f2430; margin: 0; }
+h1 { font-size: 20pt; color: #0b3d91; border-bottom: 3px solid #0b3d91;
+     padding-bottom: 6px; page-break-before: always; margin-top: 0; }
+h1:first-of-type { page-break-before: avoid; }
+h2 { font-size: 14pt; color: #0b3d91; border-bottom: 1px solid #cfd8ea;
+     padding-bottom: 3px; margin-top: 20px; }
+h3 { font-size: 12pt; color: #17408a; margin-top: 16px; }
+h4 { font-size: 10.5pt; color: #17408a; }
+p { margin: 6px 0; }
+ul, ol { margin: 6px 0; padding-left: 22px; }
+li { margin: 2px 0; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0;
+        font-size: 8.8pt; page-break-inside: avoid; }
+th { background: #0b3d91; color: #fff; text-align: left; padding: 5px 7px; }
+td { border: 1px solid #c9d2e6; padding: 4px 7px; vertical-align: top; }
+tr:nth-child(even) td { background: #f2f5fc; }
+code { font-family: Consolas, 'Cascadia Mono', monospace; font-size: 8.8pt;
+       background: #eef1f8; padding: 1px 4px; border-radius: 3px; }
+pre { background: #0f172a; color: #e2e8f0; padding: 10px 12px; border-radius: 6px;
+      overflow-x: auto; font-size: 8.6pt; line-height: 1.35; page-break-inside: avoid; }
+pre code { background: none; color: inherit; padding: 0; }
+blockquote { border-left: 4px solid #0b3d91; margin: 8px 0; padding: 4px 12px;
+             background: #f2f5fc; color: #333; }
+a { color: #0b3d91; text-decoration: none; }
+strong { color: #0b3d91; }
+hr { border: none; border-top: 1px solid #cfd8ea; margin: 16px 0; }
+</style></head><body><h1 id="adk-a2a-master-agent-discovery-end-to-end-project-report">ADK / A2A Master-Agent Discovery — End-to-End Project Report</h1>
+<p><strong>Research question: How can a Master (orchestrator) agent <em>efficiently discover</em>
+the right sub-agent over the Agent-to-Agent (A2A) protocol?</strong></p>
+<p>This report documents, end to end: what we set out to answer, what we built,
+how we measured it, what the experiments showed, and the learning points that
+fall out of the data. Companion files: <code>docs/GUIDE.md</code> (how A2A discovery
+works + how to use the repo), <code>docs/NOTES.md</code> (lab notebook), <code>experiments/</code>
+(regenerated JSON + charts).</p>
+<hr />
+<h2 id="1-executive-summary">1. Executive summary</h2>
+<p>We built a self-contained experiment lab on top of Google's <strong>Agent
+Development Kit (ADK)</strong> and the <strong>A2A protocol SDK</strong> (<code>a2a-sdk</code>) that answers
+one question with numbers: <em>which discovery strategy should a Master use, and
+what does each one cost?</em></p>
+<p>We stood up four real A2A sub-agents (each advertising an Agent Card), a
+central Agent Directory, and a Master agent with five pluggable discovery
+strategies. We then ran 6 experiments / 8 scenarios across a 12-task benchmark,
+recording <strong>selection accuracy, discovery latency, routing latency, LLM token
+cost, and failure recovery</strong>. Everything runs locally with no cloud account and
+no paid API key (the LLM experiment uses a free local Ollama model, with a
+deterministic mock fallback).</p>
+<p><strong>Top-line results:</strong> all non-faulty strategies route with 100% accuracy; the
+differences are in <em>cost</em> (0.01 ms static vs ~21 ms registry lookup vs token
+spend for LLM routing) and in <em>failure behavior</em> — where we found that the most
+dangerous failure mode is a <strong>silent misroute</strong> (an agent that is down when
+discovery runs simply never appears in the roster, so the Master routes to the
+wrong agent with no error at all).</p>
+<hr />
+<h2 id="2-the-problem-and-research-question">2. The problem and research question</h2>
+<p>A Master agent is useless if it cannot find the specialized agent that can
+actually do the work. "Discovery" in the A2A world means:</p>
+<ol>
+<li><strong>What agents exist?</strong> — roster / catalog.</li>
+<li><strong>What can each one do?</strong> — capability advertisement (skills, tags).</li>
+<li><strong>How do we reach it?</strong> — endpoint + protocol binding.</li>
+</ol>
+<p>The textbook answer — "fetch the Agent Card, pick the best match" — hides a
+bunch of engineering trade-offs. Fetch from where (each endpoint, or a central
+directory)? Cache or not (fresh vs fast)? Rank with a deterministic scorer or
+with an LLM (cost vs semantics)? And what happens when an agent is down?</p>
+<p>There was no easy, measured answer to "what should I do?", so we built the
+lab to make the trade-offs <strong>visible and quantified</strong>.</p>
+<hr />
+<h2 id="3-background-how-a2a-discovery-works-theory">3. Background — how A2A discovery works (theory)</h2>
+<h3 id="31-agent-cards">3.1 Agent Cards</h3>
+<p>Every A2A agent publishes an <strong>Agent Card</strong> at a well-known HTTP path
+(<code>/.well-known/agent-card.json</code> in this SDK). The card is the discovery
+contract:</p>
+<table>
+<thead>
+<tr>
+<th>field</th>
+<th>what it tells the Master</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code>, <code>description</code></td>
+<td>who it is, what it does</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td>how the capability contract changed over time</td>
+</tr>
+<tr>
+<td><code>supported_interfaces[]</code></td>
+<td>the real RPC endpoints (<code>{url, protocol_binding, protocol_version}</code>)</td>
+</tr>
+<tr>
+<td><code>capabilities</code></td>
+<td>streaming, push notifications</td>
+</tr>
+<tr>
+<td><code>default_input/output_modes</code></td>
+<td>what it accepts / returns</td>
+</tr>
+<tr>
+<td><code>skills[]</code></td>
+<td><strong>the searchable part</strong>: <code>{id, name, description, tags, examples}</code></td>
+</tr>
+</tbody>
+</table>
+<p>Skills are the discovery primitive — like tags on a store listing, they are
+what an orchestrator searches on.</p>
+<h3 id="32-discovery-strategies-the-spectrum-we-benchmarked">3.2 Discovery strategies (the spectrum we benchmarked)</h3>
+<table>
+<thead>
+<tr>
+<th>strategy</th>
+<th>where the answer lives</th>
+<th>cost profile</th>
+<th>risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Static</strong></td>
+<td>compile-time map inside the Master</td>
+<td>~0</td>
+<td>stale; no dynamic fleets</td>
+</tr>
+<tr>
+<td><strong>Card discovery</strong></td>
+<td>fetched from each endpoint at startup</td>
+<td>one fetch per agent, paid up front</td>
+<td>needs a seed list of endpoints</td>
+</tr>
+<tr>
+<td><strong>Directory / Registry</strong></td>
+<td>central index (Google Cloud Agent Registry, or our <code>registry_server</code>)</td>
+<td>network round trip per lookup</td>
+<td>directory is a single point of failure</td>
+</tr>
+<tr>
+<td><strong>Cached discovery</strong></td>
+<td>TTL cache in front of cards</td>
+<td>~0 after warm-up</td>
+<td>staleness</td>
+</tr>
+<tr>
+<td><strong>LLM-reasoned</strong></td>
+<td>an LLM reads the cards and decides</td>
+<td>tokens + latency</td>
+<td>cost; nondeterminism</td>
+</tr>
+</tbody>
+</table>
+<h3 id="33-the-message-flow">3.3 The message flow</h3>
+<p>Once the Master picks an agent: fetch the card, then <code>POST message/send</code>
+(JSON-RPC 2.0) with a typed <code>Message</code>; the agent runs a <code>Task</code> through a
+lifecycle (<code>submitted → working → completed | failed | canceled</code>) and streams
+status + artifact updates back. The <code>a2a-sdk</code> client hides all of this behind
+<code>client.send_message()</code>.</p>
+<hr />
+<h2 id="4-what-we-built">4. What we built</h2>
+<pre><code>adk-a2a-discovery-lab/
+├── discovery_lab/
+│   ├── config.py          # ports, fleet catalog, 12-task benchmark
+│   ├── fleet.py           # 4 deterministic skill agents + pure-Python handlers
+│   ├── server.py          # A2A AgentExecutor + FastAPI app + Agent Card
+│   ├── registry_server.py # Agent Directory: /agents, /agents/search?skill=
+│   ├── a2a_client.py      # fetch_card + send_text (over a2a-sdk)
+│   ├── strategies.py      # the 5 discovery strategies (research surface)
+│   ├── llm_client.py      # free LLM client (Ollama / OpenAI-compatible / mock)
+│   ├── master.py          # discover → select → route + failure fallback
+│   ├── metrics.py         # RunResult / ExperimentSummary
+│   ├── experiments.py     # the ladder (ex1–ex6)
+│   ├── plot.py            # accuracy / latency / token charts
+│   ├── launch.py          # fleet + registry in-process (real HTTP)
+│   ├── run.py             # CLI
+│   └── adk_demo.py        # ADK LlmAgent &quot;host&quot; driven by a free local LLM
+├── docs/                  # GUIDE.md, NOTES.md, REPORT.md (this file)
+└── experiments/           # summary.json, runs.json, *.png
+</code></pre>
+<p>Key design choices:</p>
+<ul>
+<li><strong>Real protocol, zero cloud.</strong> Sub-agents are real A2A servers on localhost
+  (FastAPI + <code>a2a-sdk</code>); the Master talks real JSON-RPC over HTTP. But the
+  sub-agents' brains are deterministic Python functions, so results are
+  reproducible and require no API keys.</li>
+<li><strong>The experiment harness is the product.</strong> Every strategy plugs into the
+  same <code>MasterAgent</code>, runs the same 12 tasks, and reports the same metrics —
+  so strategies are comparable by construction.</li>
+<li><strong>Failure is a first-class experiment</strong>, not an afterthought (ex5).</li>
+</ul>
+<hr />
+<h2 id="5-what-we-did-methodology">5. What we did — methodology</h2>
+<h3 id="51-the-benchmark-task-set">5.1 The benchmark task set</h3>
+<p>12 tasks, 3 per sub-agent. Each task declares the <strong>expected agent</strong> (ground
+truth) and a <strong>skill tag</strong>, so we can score <em>routing correctness</em> objectively:</p>
+<ul>
+<li>summarizer: summarize / tl;dr / concise</li>
+<li>translator: translate / language / multilingual</li>
+<li>extractor: extract / structured / json</li>
+<li>classifier: sentiment / urgency / label</li>
+</ul>
+<h3 id="52-the-metrics">5.2 The metrics</h3>
+<p>For every task we record:</p>
+<ul>
+<li><strong>discovery ms</strong> — time to obtain the candidate list (in-memory index hit,
+  directory round trip, or cache hit)</li>
+<li><strong>selection ms</strong> — time to choose one candidate (scoring or LLM)</li>
+<li><strong>routing ms</strong> — A2A <code>message/send</code> round trip (including the SDK's
+  per-send card re-resolution)</li>
+<li><strong>accuracy</strong> — chosen agent == expected agent</li>
+<li><strong>tokens</strong> — LLM spend (real <code>usage</code> when available, else estimated)</li>
+<li><strong>fallback / error flags</strong> — how the Master reacted to failures</li>
+</ul>
+<h3 id="53-the-experiment-ladder">5.3 The experiment ladder</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>scenario</th>
+<th>what it isolates</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ex1</td>
+<td><code>static</code></td>
+<td>the baseline floor: compile-time knowledge</td>
+</tr>
+<tr>
+<td>ex2</td>
+<td><code>card_discovery</code></td>
+<td>runtime Agent Card fetches → skill index</td>
+</tr>
+<tr>
+<td>ex3</td>
+<td><code>registry_skill</code></td>
+<td>per-request skill-tag search against the directory</td>
+</tr>
+<tr>
+<td>ex4</td>
+<td><code>cached</code> (2 passes)</td>
+<td>TTL cache: hit vs miss, amortized cost</td>
+</tr>
+<tr>
+<td>ex5a</td>
+<td><code>card_discovery</code> + agent <strong>down</strong></td>
+<td>route fails → fallback + recovery</td>
+</tr>
+<tr>
+<td>ex5b</td>
+<td><code>card_discovery</code> + agent <strong>vanished</strong></td>
+<td>agent missing at discovery time</td>
+</tr>
+<tr>
+<td>ex5c</td>
+<td>recovery (agent restarted)</td>
+<td>does re-discovery self-heal?</td>
+</tr>
+<tr>
+<td>ex6</td>
+<td><code>llm_reasoned</code></td>
+<td>free LLM picks the agent (tokens + latency)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="6-what-we-achieved-results">6. What we achieved — results</h2>
+<p>Reference run (localhost, Windows, Python 3.10, a2a-sdk 1.1.2, ADK 2.7).
+Regenerate anytime with <code>py -m discovery_lab.run</code>.</p>
+<table>
+<thead>
+<tr>
+<th>scenario</th>
+<th>accuracy</th>
+<th>discovery ms</th>
+<th>selection ms</th>
+<th>routing ms</th>
+<th>total ms</th>
+<th>tokens</th>
+<th>cache hits</th>
+<th>fallbacks</th>
+<th>errors</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ex1 static</td>
+<td>100%</td>
+<td>0.012</td>
+<td>0.002</td>
+<td>74.5</td>
+<td>74.5</td>
+<td>0</td>
+<td>–</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr>
+<td>ex2 card_discovery</td>
+<td>100%</td>
+<td>0.001</td>
+<td>0.21</td>
+<td>45.2</td>
+<td>45.4</td>
+<td>0</td>
+<td>–</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr>
+<td>ex3 registry_skill</td>
+<td>100%</td>
+<td><strong>20.7</strong></td>
+<td>0.06</td>
+<td>28.3</td>
+<td>49.0</td>
+<td>0</td>
+<td>–</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr>
+<td>ex4 cached (pass 1)</td>
+<td>100%</td>
+<td>0.025</td>
+<td>0.23</td>
+<td>37.2</td>
+<td>37.5</td>
+<td>0</td>
+<td>12/12</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr>
+<td>ex4 cached (pass 2)</td>
+<td>100%</td>
+<td>0.039</td>
+<td>0.27</td>
+<td>52.8</td>
+<td>53.1</td>
+<td>0</td>
+<td>24/24</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr>
+<td><strong>ex5a agent down</strong></td>
+<td><strong>0%</strong></td>
+<td>0.009</td>
+<td>0.36</td>
+<td><strong>2105</strong></td>
+<td><strong>2105</strong></td>
+<td>0</td>
+<td>–</td>
+<td><strong>3</strong></td>
+<td>0</td>
+</tr>
+<tr>
+<td><strong>ex5b agent vanished</strong></td>
+<td><strong>0%</strong></td>
+<td>0.001</td>
+<td>0.11</td>
+<td>29.5</td>
+<td>29.6</td>
+<td>0</td>
+<td>–</td>
+<td><strong>0</strong></td>
+<td><strong>0</strong></td>
+</tr>
+<tr>
+<td>ex5c recovery</td>
+<td>100%</td>
+<td>0.002</td>
+<td>0.20</td>
+<td>57.0</td>
+<td>57.2</td>
+<td>0</td>
+<td>–</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr>
+<td>ex6 llm_reasoned</td>
+<td>100%</td>
+<td>0.003</td>
+<td>0.37</td>
+<td>64.6</td>
+<td>65.0</td>
+<td><strong>2266</strong></td>
+<td>–</td>
+<td>0</td>
+<td>0</td>
+</tr>
+</tbody>
+</table>
+<h3 id="61-per-experiment-analysis">6.1 Per-experiment analysis</h3>
+<p><strong>ex1 — static.</strong> Perfect accuracy, ~0 ms discovery. It is the <em>floor</em>: the
+Master "knows" the answer. Cost of that knowledge is zero flexibility — adding
+an agent, moving a port, or sharing across teams means editing code. This is
+why real systems need some form of dynamic discovery.</p>
+<p><strong>ex2 — card discovery.</strong> Fetch cards once at startup, index skills, score per
+task. Discovery is essentially free per request (~0.001 ms) because the network
+cost is paid once at setup. Same accuracy. <strong>Lesson: when the roster is small
+and stable, fetch-and-index beats query-per-request.</strong></p>
+<p><strong>ex3 — registry skill search.</strong> Per-request HTTP round trip to the directory.
+Discovery jumped to <strong>~21 ms</strong> — four orders of magnitude more than ex2's
+in-memory hit — for identical accuracy. The directory buys <em>dynamic
+registration, governance, and scale</em> (agents can join/leave without touching
+the Master), but you pay network latency on every lookup. <strong>Lesson: a directory
+is a scalability/governance feature, not a speed feature — cache its answers.</strong></p>
+<p><strong>ex4 — cached discovery.</strong> A TTL cache turns ex3's network cost into ex2's
+memory cost (0.03 ms, all 36 tasks cache hits). The price is <strong>staleness</strong>:
+the cache will happily point at an old endpoint until the TTL expires. TTL is
+the latency-vs-freshness knob.</p>
+<p><strong>ex5 — failure (the important one).</strong> Two distinct failure modes emerged:</p>
+<ul>
+<li><strong>5a "agent down" (card known):</strong> the Master selected the correct agent
+  (translator), the A2A send failed, and the Master re-discovered <em>excluding</em>
+  the dead agent and re-routed. Fallback engaged (<code>fallbacks=3</code>) but accuracy
+  was 0% — the fallback candidate was the <em>wrong</em> agent (summarizer for a
+  translation task). Routing latency exploded to <strong>2.1 s</strong> due to the SDK's
+  per-send card re-fetch + connect timeout on the dead endpoint.</li>
+<li><strong>5b "agent vanished" (card unreachable at discovery time):</strong> because the
+  agent was down <em>when cards were fetched</em>, it never entered the roster. The
+  Master <strong>silently</strong> routed translation tasks to a wrong agent —
+  <code>fallbacks=0, errors=0, accuracy=0%</code>. No exception, no signal, no log.
+  <strong>This is the scarier failure</strong>: a discovery failure looks like "this agent
+  does not exist", not "this agent is broken".</li>
+<li><strong>5c recovery:</strong> restart the agent, re-discover → 100% accuracy again.
+  Discovery self-heals by re-fetching cards; what it <em>cannot</em> do is verify
+  liveness between refreshes.</li>
+</ul>
+<p><strong>ex6 — LLM-reasoned routing.</strong> A free local LLM reads the discovered cards and
+picks the agent. With no LLM present it falls back to the deterministic scorer
+(<code>llm_mode=mock</code>, tokens are still estimated). The LLM path buys <em>semantic</em>
+routing — it can understand "translate" even when tags are sparse — but costs
+<strong>tokens (≈2,266 estimated for 12 tasks) and extra selection latency</strong>, and its
+accuracy is only as good as the model + prompt. On this small, well-tagged
+fleet the deterministic scorer won on cost.</p>
+<h3 id="62-what-the-charts-show">6.2 What the charts show</h3>
+<ul>
+<li><code>accuracy.png</code> — every strategy hits 100% except the two fault scenarios (0%).</li>
+<li><code>latency.png</code> — the registry's ~21 ms discovery spike vs near-zero for
+  static/card/cached; the 2.1 s spike for the "agent down" route.</li>
+<li><code>tokens.png</code> — only the LLM strategy spends tokens.</li>
+</ul>
+<hr />
+<h2 id="7-learning-points">7. Learning points</h2>
+<h3 id="71-design-lessons-the-answers">7.1 Design lessons (the answers)</h3>
+<ol>
+<li><strong>Discovery ≠ routing.</strong> "Find candidates" and "pick one" are separate,
+   differently-priced operations. Optimize them separately: index once and
+   cache the index; spend the expensive selector (LLM) only when the cheap
+   scorer is uncertain.</li>
+<li><strong>A directory is for governance, not speed.</strong> It gives dynamic registration
+   and a governed catalog, but each lookup is a network round trip. Cache
+   directory responses (TTL) to get in-memory speed.</li>
+<li><strong>Static is a floor, not a target.</strong> ~0 cost, but zero dynamism and zero
+   resilience — any evolving fleet needs card/directory discovery.</li>
+<li><strong>Caching trades freshness for speed, and freshness is a correctness
+   concern.</strong> A stale card can send the Master to a dead endpoint. Combine a
+   cache with a liveness/fallback path, or bounded retries.</li>
+<li><strong>Plan for failure from day one — and monitor the roster, not just call
+   success.</strong> Silent misrouting (5b) had no error at all; only monitoring
+   <em>roster completeness</em> catches it. The fallback path (5a) at least makes
+   failure visible, but can still pick the wrong agent — fallback should be
+   <em>aware</em> of task-skill fit, not just "next in the list".</li>
+<li><strong>LLM routing buys semantics at a real price.</strong> Worth it for fuzzy,
+   noisy, or open-ended task routing; overkill for a small, well-tagged fleet.</li>
+</ol>
+<h3 id="72-engineering-lessons-a2a-sdk-specifics-we-hit">7.2 Engineering lessons (A2A / SDK specifics we hit)</h3>
+<ol start="7">
+<li><strong>a2a-sdk v1 is proto-based, not pydantic.</strong> <code>a2a.types</code> re-exports
+   <code>a2a_pb2</code>; enums are prefixed (<code>TASK_STATE_WORKING</code>, <code>ROLE_USER</code>). Code
+   written for the 0.3.x (pydantic) API will not port directly.</li>
+<li><strong>The card's <code>supported_interfaces[].url</code> must be the RPC route</strong>, not the
+   server root — otherwise the client POSTs JSON-RPC to <code>/</code> and gets a 404.</li>
+<li><strong><code>create_client(agent=...)</code> re-resolves the Agent Card on every send.</strong>
+   That per-send card fetch is visible in our routing numbers (~30–75 ms on
+   localhost) and becomes a 2-second timeout when the agent is down. Production
+   Masters should reuse clients / cache resolved cards.</li>
+<li><strong>ADK specifics:</strong> <code>LiteLlm</code> lives under <code>google.adk.models.lite_llm</code> and
+    requires the <code>google-adk[extensions]</code> extra (there is no <code>[lite-llm]</code>
+    extra in 2.7); the v2 <code>Content</code>/<code>Part</code> types come from
+    <code>google.adk.utils.content_utils</code>.</li>
+<li><strong>Keep the LLM optional.</strong> A pluggable client with a deterministic fallback
+    (our <code>llm_client</code>) means the whole lab runs with zero API keys and zero
+    external services, and the real-LLM path is a one-line env change.</li>
+</ol>
+<h3 id="73-process-lessons">7.3 Process lessons</h3>
+<ol start="12">
+<li><strong>Measure before you optimize.</strong> The registry "looked" fine until we
+    measured discovery at 21 ms vs 0.03 ms cached; the silent-misroute failure
+    was invisible until we deliberately killed an agent mid-run.</li>
+<li><strong>Make failure an experiment.</strong> Injecting faults (stop an agent, restart an
+    agent) surfaced behavior that happy-path testing never would.</li>
+</ol>
+<hr />
+<h2 id="8-limitations">8. Limitations</h2>
+<ul>
+<li>Sub-agents are deterministic (no LLM inside), so we measured <em>routing</em>
+  correctness, not <em>reply</em> quality.</li>
+<li>Latency is on localhost; real networks amplify registry/cache differences.</li>
+<li><code>registry_skill</code> trusts the tag each task declares; a harder variant would
+  have the Master <em>infer</em> the skill from free text (that is ex6).</li>
+<li>TTL staleness is not yet <em>injected</em> in ex4 — we could set a tiny TTL, mutate
+  a card, and measure the staleness window explicitly.</li>
+<li>Fleet size is small (4 agents); scaling to N agents (index vs linear lookup,
+  directory broadcast) is an obvious next benchmark.</li>
+</ul>
+<hr />
+<h2 id="9-next-steps">9. Next steps</h2>
+<ol>
+<li>Swap deterministic sub-agents for real ADK <code>LlmAgent</code> workers (via
+   <code>to_a2a</code>) and re-run the same ladder.</li>
+<li>Add a <strong>large-scale experiment</strong>: register 10–100 agents, compare index
+   lookup vs directory broadcast vs LLM selection as N grows.</li>
+<li>Implement <strong>skill-inference routing</strong>: Master infers the skill from task
+   free text, then compares deterministic scoring vs LLM end-to-end.</li>
+<li><strong>Hardening experiment</strong>: inject stale cards + dead endpoints, and measure
+   fallback <em>fitness</em> (does the fallback pick the next-best <em>fitting</em> agent?).</li>
+<li>Wire observability (tracing of card fetch → selection → task) on top of the
+   metrics already collected.</li>
+</ol>
+<h2 id="10-references">10. References</h2>
+<ul>
+<li><code>a2aproject/A2A</code> — protocol spec (Agent Card schema, JSON-RPC methods).</li>
+<li><code>a2aproject/a2a-sdk</code> — Python SDK (v1.x, proto-based types).</li>
+<li><code>google/adk-python</code> — ADK: <code>to_a2a()</code>, <code>RemoteA2aAgent</code>, <code>LlmAgent</code>.</li>
+<li>Google codelab <em>Multi-Agent Systems with Agent2Agent</em> — host-agent pattern.</li>
+<li>Google Cloud Agent Registry — production skill-tag discovery.</li>
+</ul></body></html>
