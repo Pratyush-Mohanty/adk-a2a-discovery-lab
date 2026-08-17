@@ -1,0 +1,7 @@
+# Core lab (runs fully offline, no API keys)
+a2a-sdk[http-server]>=1.1,<2
+httpx>=0.27
+fastapi>=0.110
+uvicorn>=0.29
+matplotlib>=3.8
+numpy>=1.26

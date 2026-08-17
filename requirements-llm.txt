@@ -1,0 +1,4 @@
+# Optional: run the ADK host-agent demo with a free local LLM
+#   pip install -r requirements-llm.txt
+#   then run: py -m discovery_lab.adk_demo
+google-adk[a2a,extensions]
