@@ -32,7 +32,8 @@ sub-agent?** The answer is a trade-off spectrum — static (zero cost, zero
 flexibility) → card discovery (one fetch per agent) → registry search (network
 per query) → cached (fast but stale) → LLM-reasoned (semantic but costs tokens).
 
-See **[docs/GUIDE.md](docs/GUIDE.md)** for the full mechanism walkthrough and
+See **[docs/REPORT.md](docs/REPORT.md)** for the full end-to-end report (what we did, results, learning points),
+**[docs/GUIDE.md](docs/GUIDE.md)** for the mechanism walkthrough, and
 **[docs/NOTES.md](docs/NOTES.md)** for the lab notebook.
 
 ## Experiment ladder
