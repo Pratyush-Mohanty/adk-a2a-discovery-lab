@@ -126,6 +126,29 @@ Key design choices:
   so strategies are comparable by construction.
 - **Failure is a first-class experiment**, not an afterthought (ex5).
 
+### 4.1 The sub-agent fleet (what we tested with)
+
+Four deterministic "skill workers". Each is a **real A2A server** (FastAPI +
+`a2a-sdk`) with its own Agent Card at `/.well-known/agent-card.json`, a
+JSON-RPC 1.0 endpoint at `/a2a/jsonrpc`, an HTTP+JSON endpoint at `/a2a/rest`,
+streaming capability, and input/output modes `text/plain` + `application/json`.
+They are **deterministic** — the "brains" are pure-Python handlers with no LLM —
+so every run is reproducible offline. Each simulates **8 ms of work** per task
+so routing timings stay measurable.
+
+| agent | port | configured for (role) | skills (`id` → tags) | handler behaviour | tasks |
+|---|---|---|---|---|---|
+| **summarizer** | 8101 | concise summaries & tl;dr | `summarize` → [summarize, summary]; `tldr` → [tl;dr, concise] | splits text into sentences, keeps the first 2 as "key points", reports word count → `[summary] Word count: N. Key points: …` | t01–t03 |
+| **translator** | 8102 | EN ↔ ES / FR / HI translation | `translate` → [translate, language]; `multiling` → [multilingual, i18n] | detects the target language from the text (spanish/french/hindi), maps words through a small bilingual dictionary → `[translated -> <lang>] …` | t04–t06 |
+| **extractor** | 8103 | structured data extraction (PII) | `extract` → [extract, structured, json]; `pii` → [pii, entities] | regex extraction of emails, phone numbers, dates, money amounts → JSON | t07–t09 |
+| **classifier** | 8104 | sentiment / urgency / topic labeling | `classify` → [sentiment, classify]; `label` → [label, urgency, ops] | keyword lexicons for positive/negative sentiment, urgency, ops topic → JSON | t10–t12 |
+
+**Why these four?** They are deliberately ambiguous at the edges — extractor and
+classifier both touch "entities", summarizer and classifier both do text
+analysis — so routing is a *real decision*, not a trivial exact-tag lookup. The
+task's declared skill tag gives the deterministic scorer a fair chance; the
+fuzzier phrasing of the task text is what separates good routing from guessing.
+
 ---
 
 ## 5. What we did — methodology
@@ -134,10 +157,20 @@ Key design choices:
 12 tasks, 3 per sub-agent. Each task declares the **expected agent** (ground
 truth) and a **skill tag**, so we can score *routing correctness* objectively:
 
-- summarizer: summarize / tl;dr / concise
-- translator: translate / language / multilingual
-- extractor: extract / structured / json
-- classifier: sentiment / urgency / label
+| id | task text (abridged) | expected agent | skill tag | note |
+|---|---|---|---|---|
+| t01 | the cat sat on the mat and the dog barked loudly while the neighbors watched | summarizer | summarize | long sentence → summarize |
+| t02 | quantum computing uses qubits that can be in superposition states… | summarizer | tl;dr | dense → tl;dr |
+| t03 | distributed systems sacrifice consistency for availability under the cap theorem… | summarizer | concise | dense → concise |
+| t04 | translate this greeting to spanish: hello good morning | translator | translate | EN → ES |
+| t05 | please translate the following to french: thank you very much | translator | language | EN → FR |
+| t06 | convert to hindi: where is the nearest railway station | translator | multilingual | EN → HI |
+| t07 | extract emails dates and money from: contact jane.doe@example.com by 2026-12-31 and pay $1,299.50 | extractor | extract | entities |
+| t08 | find phone numbers and emails in: call +91-98765-43210 or write info@acme.io today | extractor | structured | PII |
+| t09 | pull out all named entities and dates: Dr. Reyes reviewed the MRI on April 3rd… | extractor | json | NER |
+| t10 | classify the sentiment of this review: the service was awful and the food arrived cold | classifier | sentiment | negative |
+| t11 | classify urgency: the production database is down and customers are blocked from paying | classifier | urgency | high urgency |
+| t12 | tag this ticket: server keeps crashing after the new deploy at midnight | classifier | label | ops ticket |
 
 ### 5.2 The metrics
 For every task we record:
@@ -163,6 +196,63 @@ For every task we record:
 | ex5b | `card_discovery` + agent **vanished** | agent missing at discovery time |
 | ex5c | recovery (agent restarted) | does re-discovery self-heal? |
 | ex6 | `llm_reasoned` | free LLM picks the agent (tokens + latency) |
+
+### 5.4 How each method worked (what we did, step by step)
+
+Every method runs the same Master loop — **discover → select → route** — and
+differs only in the first two steps.
+
+**static**
+1. At setup, build a compile-time map `skill-tag → agent` straight from the
+   fleet spec (no network).
+2. Per task: look up the task's declared tag → pick that agent. If the tag is
+   missing or the agent is excluded, rank all candidates by keyword overlap.
+3. Cost: a dict lookup (~0.01 ms). This is the floor every other method must
+   justify itself against.
+
+**card_discovery**
+1. At setup, for each of the 4 known endpoints, `HTTP GET
+   /.well-known/agent-card.json` via the a2a-sdk `A2ACardResolver`, parse each
+   card's skills, and build a `tag → [cards]` index in memory.
+2. Per task: score every candidate = keyword overlap between the task text and
+   the card's skill tags/descriptions, plus a bonus for an exact `skill_tag`
+   match; sort; take the top agent.
+3. Cost: all network paid once at setup; per-request discovery is an in-memory
+   index query (~0.001 ms).
+
+**registry_skill**
+1. Per task: `HTTP GET <directory>/agents/search?skill=<tag>` against the Agent
+   Directory. If the search fails, fall back to `GET /agents` (full listing).
+2. Same ranking + pick as card_discovery.
+3. Cost: a network round trip per request (~21 ms here) — this is the
+   measurement that makes the "directory is slow per lookup" trade-off visible.
+
+**cached**
+1. Same card fetch as card_discovery, but behind a **30 s TTL cache**, warmed
+   at setup.
+2. Per task: check whether any cached card has expired; re-fetch only the
+   expired ones; then run the same index query. Record whether the request was
+   a cache hit.
+3. Cost: ~0.03 ms on a hit (all 36 tasks in the run were hits). The hidden
+   price is staleness — the cache keeps serving an old endpoint until the TTL
+   fires, even if the agent moved or died.
+
+**llm_reasoned**
+1. Build the same in-memory card index as card_discovery.
+2. Per task: render a prompt — *"You are a routing dispatcher. Reply with ONLY
+   the agent name…"* — listing every card as `name: description (skills: tags)`,
+   and ask the free LLM (Ollama by default, any OpenAI-compatible endpoint
+   otherwise) to pick one; parse the returned name; record token usage.
+3. If no LLM is reachable, fall back transparently to the deterministic keyword
+   scorer (`llm_mode=mock`, tokens still estimated) so the experiment runs
+   offline.
+4. Cost: ~0.37 ms selection + **≈2,266 tokens per 12-task run** — the only
+   method that spends tokens.
+
+**Failure handling (used by all):** if routing to the chosen agent throws (dead
+endpoint), the Master re-runs discovery **excluding** that agent and tries the
+next-best candidate once. That fallback is what ex5a exercises; ex5b shows what
+happens when the dead agent was never discovered in the first place.
 
 ---
 
@@ -239,6 +329,44 @@ fleet the deterministic scorer won on cost.
 - `latency.png` — the registry's ~21 ms discovery spike vs near-zero for
   static/card/cached; the 2.1 s spike for the "agent down" route.
 - `tokens.png` — only the LLM strategy spends tokens.
+
+### 6.3 The verdict: which discovery method wins?
+
+We score each method on five axes (higher = better; cost = lower is better):
+
+| method | accuracy | discovery cost | tokens | resilience | simplicity | overall |
+|---|---|---|---|---|---|---|
+| static | 100% | ~0.01 ms ⭐ | 0 ⭐ | weak (no roster) | ⭐⭐⭐⭐⭐ | great floor, no dynamism |
+| **card_discovery** | 100% | ~0.001 ms ⭐ | 0 ⭐ | needs fallback | ⭐⭐⭐⭐ | **runner-up for small fleets** |
+| registry_skill | 100% | **20.7 ms** | 0 ⭐ | SPOF, needs fallback | ⭐⭐⭐ | right for scale, slow per lookup |
+| **cached** | 100% | ~0.03 ms ⭐ | 0 ⭐ | stale cards, needs fallback | ⭐⭐⭐ | **🏆 overall winner** |
+| llm_reasoned | 100% | 0.37 ms + tokens | **2266** | needs fallback | ⭐⭐ | wins only on semantics |
+
+**Overall winner: Cached card discovery.**
+
+On a well-tagged fleet, all five are equally accurate (100%), so the decision
+falls on cost and robustness. Cached discovery matches static/card discovery's
+near-zero per-request latency (0.03 ms vs 21 ms for a registry lookup), spends
+zero tokens, and — unlike static — keeps working when the roster changes,
+because it re-fetches cards on TTL expiry. For a small, stable fleet the
+**runner-up is plain card_discovery**: same accuracy and speed, simpler (no TTL
+machinery), discovery paid once at startup.
+
+The **podium, by situation** (there is no single winner for every deployment):
+
+| your situation | use this method |
+|---|---|
+| tiny fixed fleet, endpoints known, want zero machinery | **static** (or just card_discovery) |
+| small/medium fleet that changes; want minimum latency + simplicity | **card_discovery** |
+| large/dynamic fleet; need governance + discovery without touching Masters | **registry_skill + cache** (directory is source of truth, cache for speed) |
+| fuzzy/ambiguous tasks, sparse or noisy tags, need semantic matching | **llm_reasoned** (pay tokens for understanding) |
+| anything production | always pair the winner with a **failure fallback** and **roster-completeness monitoring** (ex5b) |
+
+**The one caveat that beats every method:** none of them detects a "vanished"
+agent — if a sub-agent is down when discovery runs, the Master silently routes
+to the wrong agent with zero error. Whichever method you pick, add liveness /
+roster monitoring on top; that single finding (ex5b) is worth more than any
+latency difference between the methods.
 
 ---
 

@@ -193,17 +193,167 @@ status + artifact updates back. The <code>a2a-sdk</code> client hides all of thi
   so strategies are comparable by construction.</li>
 <li><strong>Failure is a first-class experiment</strong>, not an afterthought (ex5).</li>
 </ul>
+<h3 id="41-the-sub-agent-fleet-what-we-tested-with">4.1 The sub-agent fleet (what we tested with)</h3>
+<p>Four deterministic "skill workers". Each is a <strong>real A2A server</strong> (FastAPI +
+<code>a2a-sdk</code>) with its own Agent Card at <code>/.well-known/agent-card.json</code>, a
+JSON-RPC 1.0 endpoint at <code>/a2a/jsonrpc</code>, an HTTP+JSON endpoint at <code>/a2a/rest</code>,
+streaming capability, and input/output modes <code>text/plain</code> + <code>application/json</code>.
+They are <strong>deterministic</strong> — the "brains" are pure-Python handlers with no LLM —
+so every run is reproducible offline. Each simulates <strong>8 ms of work</strong> per task
+so routing timings stay measurable.</p>
+<table>
+<thead>
+<tr>
+<th>agent</th>
+<th>port</th>
+<th>configured for (role)</th>
+<th>skills (<code>id</code> → tags)</th>
+<th>handler behaviour</th>
+<th>tasks</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>summarizer</strong></td>
+<td>8101</td>
+<td>concise summaries &amp; tl;dr</td>
+<td><code>summarize</code> → [summarize, summary]; <code>tldr</code> → [tl;dr, concise]</td>
+<td>splits text into sentences, keeps the first 2 as "key points", reports word count → <code>[summary] Word count: N. Key points: …</code></td>
+<td>t01–t03</td>
+</tr>
+<tr>
+<td><strong>translator</strong></td>
+<td>8102</td>
+<td>EN ↔ ES / FR / HI translation</td>
+<td><code>translate</code> → [translate, language]; <code>multiling</code> → [multilingual, i18n]</td>
+<td>detects the target language from the text (spanish/french/hindi), maps words through a small bilingual dictionary → <code>[translated -&gt; &lt;lang&gt;] …</code></td>
+<td>t04–t06</td>
+</tr>
+<tr>
+<td><strong>extractor</strong></td>
+<td>8103</td>
+<td>structured data extraction (PII)</td>
+<td><code>extract</code> → [extract, structured, json]; <code>pii</code> → [pii, entities]</td>
+<td>regex extraction of emails, phone numbers, dates, money amounts → JSON</td>
+<td>t07–t09</td>
+</tr>
+<tr>
+<td><strong>classifier</strong></td>
+<td>8104</td>
+<td>sentiment / urgency / topic labeling</td>
+<td><code>classify</code> → [sentiment, classify]; <code>label</code> → [label, urgency, ops]</td>
+<td>keyword lexicons for positive/negative sentiment, urgency, ops topic → JSON</td>
+<td>t10–t12</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Why these four?</strong> They are deliberately ambiguous at the edges — extractor and
+classifier both touch "entities", summarizer and classifier both do text
+analysis — so routing is a <em>real decision</em>, not a trivial exact-tag lookup. The
+task's declared skill tag gives the deterministic scorer a fair chance; the
+fuzzier phrasing of the task text is what separates good routing from guessing.</p>
 <hr />
 <h2 id="5-what-we-did-methodology">5. What we did — methodology</h2>
 <h3 id="51-the-benchmark-task-set">5.1 The benchmark task set</h3>
 <p>12 tasks, 3 per sub-agent. Each task declares the <strong>expected agent</strong> (ground
 truth) and a <strong>skill tag</strong>, so we can score <em>routing correctness</em> objectively:</p>
-<ul>
-<li>summarizer: summarize / tl;dr / concise</li>
-<li>translator: translate / language / multilingual</li>
-<li>extractor: extract / structured / json</li>
-<li>classifier: sentiment / urgency / label</li>
-</ul>
+<table>
+<thead>
+<tr>
+<th>id</th>
+<th>task text (abridged)</th>
+<th>expected agent</th>
+<th>skill tag</th>
+<th>note</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>t01</td>
+<td>the cat sat on the mat and the dog barked loudly while the neighbors watched</td>
+<td>summarizer</td>
+<td>summarize</td>
+<td>long sentence → summarize</td>
+</tr>
+<tr>
+<td>t02</td>
+<td>quantum computing uses qubits that can be in superposition states…</td>
+<td>summarizer</td>
+<td>tl;dr</td>
+<td>dense → tl;dr</td>
+</tr>
+<tr>
+<td>t03</td>
+<td>distributed systems sacrifice consistency for availability under the cap theorem…</td>
+<td>summarizer</td>
+<td>concise</td>
+<td>dense → concise</td>
+</tr>
+<tr>
+<td>t04</td>
+<td>translate this greeting to spanish: hello good morning</td>
+<td>translator</td>
+<td>translate</td>
+<td>EN → ES</td>
+</tr>
+<tr>
+<td>t05</td>
+<td>please translate the following to french: thank you very much</td>
+<td>translator</td>
+<td>language</td>
+<td>EN → FR</td>
+</tr>
+<tr>
+<td>t06</td>
+<td>convert to hindi: where is the nearest railway station</td>
+<td>translator</td>
+<td>multilingual</td>
+<td>EN → HI</td>
+</tr>
+<tr>
+<td>t07</td>
+<td>extract emails dates and money from: contact jane.doe@example.com by 2026-12-31 and pay $1,299.50</td>
+<td>extractor</td>
+<td>extract</td>
+<td>entities</td>
+</tr>
+<tr>
+<td>t08</td>
+<td>find phone numbers and emails in: call +91-98765-43210 or write info@acme.io today</td>
+<td>extractor</td>
+<td>structured</td>
+<td>PII</td>
+</tr>
+<tr>
+<td>t09</td>
+<td>pull out all named entities and dates: Dr. Reyes reviewed the MRI on April 3rd…</td>
+<td>extractor</td>
+<td>json</td>
+<td>NER</td>
+</tr>
+<tr>
+<td>t10</td>
+<td>classify the sentiment of this review: the service was awful and the food arrived cold</td>
+<td>classifier</td>
+<td>sentiment</td>
+<td>negative</td>
+</tr>
+<tr>
+<td>t11</td>
+<td>classify urgency: the production database is down and customers are blocked from paying</td>
+<td>classifier</td>
+<td>urgency</td>
+<td>high urgency</td>
+</tr>
+<tr>
+<td>t12</td>
+<td>tag this ticket: server keeps crashing after the new deploy at midnight</td>
+<td>classifier</td>
+<td>label</td>
+<td>ops ticket</td>
+</tr>
+</tbody>
+</table>
 <h3 id="52-the-metrics">5.2 The metrics</h3>
 <p>For every task we record:</p>
 <ul>
@@ -268,6 +418,55 @@ truth) and a <strong>skill tag</strong>, so we can score <em>routing correctness
 </tr>
 </tbody>
 </table>
+<h3 id="54-how-each-method-worked-what-we-did-step-by-step">5.4 How each method worked (what we did, step by step)</h3>
+<p>Every method runs the same Master loop — <strong>discover → select → route</strong> — and
+differs only in the first two steps.</p>
+<p><strong>static</strong>
+1. At setup, build a compile-time map <code>skill-tag → agent</code> straight from the
+   fleet spec (no network).
+2. Per task: look up the task's declared tag → pick that agent. If the tag is
+   missing or the agent is excluded, rank all candidates by keyword overlap.
+3. Cost: a dict lookup (~0.01 ms). This is the floor every other method must
+   justify itself against.</p>
+<p><strong>card_discovery</strong>
+1. At setup, for each of the 4 known endpoints, <code>HTTP GET
+   /.well-known/agent-card.json</code> via the a2a-sdk <code>A2ACardResolver</code>, parse each
+   card's skills, and build a <code>tag → [cards]</code> index in memory.
+2. Per task: score every candidate = keyword overlap between the task text and
+   the card's skill tags/descriptions, plus a bonus for an exact <code>skill_tag</code>
+   match; sort; take the top agent.
+3. Cost: all network paid once at setup; per-request discovery is an in-memory
+   index query (~0.001 ms).</p>
+<p><strong>registry_skill</strong>
+1. Per task: <code>HTTP GET &lt;directory&gt;/agents/search?skill=&lt;tag&gt;</code> against the Agent
+   Directory. If the search fails, fall back to <code>GET /agents</code> (full listing).
+2. Same ranking + pick as card_discovery.
+3. Cost: a network round trip per request (~21 ms here) — this is the
+   measurement that makes the "directory is slow per lookup" trade-off visible.</p>
+<p><strong>cached</strong>
+1. Same card fetch as card_discovery, but behind a <strong>30 s TTL cache</strong>, warmed
+   at setup.
+2. Per task: check whether any cached card has expired; re-fetch only the
+   expired ones; then run the same index query. Record whether the request was
+   a cache hit.
+3. Cost: ~0.03 ms on a hit (all 36 tasks in the run were hits). The hidden
+   price is staleness — the cache keeps serving an old endpoint until the TTL
+   fires, even if the agent moved or died.</p>
+<p><strong>llm_reasoned</strong>
+1. Build the same in-memory card index as card_discovery.
+2. Per task: render a prompt — <em>"You are a routing dispatcher. Reply with ONLY
+   the agent name…"</em> — listing every card as <code>name: description (skills: tags)</code>,
+   and ask the free LLM (Ollama by default, any OpenAI-compatible endpoint
+   otherwise) to pick one; parse the returned name; record token usage.
+3. If no LLM is reachable, fall back transparently to the deterministic keyword
+   scorer (<code>llm_mode=mock</code>, tokens still estimated) so the experiment runs
+   offline.
+4. Cost: ~0.37 ms selection + <strong>≈2,266 tokens per 12-task run</strong> — the only
+   method that spends tokens.</p>
+<p><strong>Failure handling (used by all):</strong> if routing to the chosen agent throws (dead
+endpoint), the Master re-runs discovery <strong>excluding</strong> that agent and tries the
+next-best candidate once. That fallback is what ex5a exercises; ex5b shows what
+happens when the dead agent was never discovered in the first place.</p>
 <hr />
 <h2 id="6-what-we-achieved-results">6. What we achieved — results</h2>
 <p>Reference run (localhost, Windows, Python 3.10, a2a-sdk 1.1.2, ADK 2.7).
@@ -449,6 +648,112 @@ fleet the deterministic scorer won on cost.</p>
   static/card/cached; the 2.1 s spike for the "agent down" route.</li>
 <li><code>tokens.png</code> — only the LLM strategy spends tokens.</li>
 </ul>
+<h3 id="63-the-verdict-which-discovery-method-wins">6.3 The verdict: which discovery method wins?</h3>
+<p>We score each method on five axes (higher = better; cost = lower is better):</p>
+<table>
+<thead>
+<tr>
+<th>method</th>
+<th>accuracy</th>
+<th>discovery cost</th>
+<th>tokens</th>
+<th>resilience</th>
+<th>simplicity</th>
+<th>overall</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>static</td>
+<td>100%</td>
+<td>~0.01 ms ⭐</td>
+<td>0 ⭐</td>
+<td>weak (no roster)</td>
+<td>⭐⭐⭐⭐⭐</td>
+<td>great floor, no dynamism</td>
+</tr>
+<tr>
+<td><strong>card_discovery</strong></td>
+<td>100%</td>
+<td>~0.001 ms ⭐</td>
+<td>0 ⭐</td>
+<td>needs fallback</td>
+<td>⭐⭐⭐⭐</td>
+<td><strong>runner-up for small fleets</strong></td>
+</tr>
+<tr>
+<td>registry_skill</td>
+<td>100%</td>
+<td><strong>20.7 ms</strong></td>
+<td>0 ⭐</td>
+<td>SPOF, needs fallback</td>
+<td>⭐⭐⭐</td>
+<td>right for scale, slow per lookup</td>
+</tr>
+<tr>
+<td><strong>cached</strong></td>
+<td>100%</td>
+<td>~0.03 ms ⭐</td>
+<td>0 ⭐</td>
+<td>stale cards, needs fallback</td>
+<td>⭐⭐⭐</td>
+<td><strong>🏆 overall winner</strong></td>
+</tr>
+<tr>
+<td>llm_reasoned</td>
+<td>100%</td>
+<td>0.37 ms + tokens</td>
+<td><strong>2266</strong></td>
+<td>needs fallback</td>
+<td>⭐⭐</td>
+<td>wins only on semantics</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Overall winner: Cached card discovery.</strong></p>
+<p>On a well-tagged fleet, all five are equally accurate (100%), so the decision
+falls on cost and robustness. Cached discovery matches static/card discovery's
+near-zero per-request latency (0.03 ms vs 21 ms for a registry lookup), spends
+zero tokens, and — unlike static — keeps working when the roster changes,
+because it re-fetches cards on TTL expiry. For a small, stable fleet the
+<strong>runner-up is plain card_discovery</strong>: same accuracy and speed, simpler (no TTL
+machinery), discovery paid once at startup.</p>
+<p>The <strong>podium, by situation</strong> (there is no single winner for every deployment):</p>
+<table>
+<thead>
+<tr>
+<th>your situation</th>
+<th>use this method</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>tiny fixed fleet, endpoints known, want zero machinery</td>
+<td><strong>static</strong> (or just card_discovery)</td>
+</tr>
+<tr>
+<td>small/medium fleet that changes; want minimum latency + simplicity</td>
+<td><strong>card_discovery</strong></td>
+</tr>
+<tr>
+<td>large/dynamic fleet; need governance + discovery without touching Masters</td>
+<td><strong>registry_skill + cache</strong> (directory is source of truth, cache for speed)</td>
+</tr>
+<tr>
+<td>fuzzy/ambiguous tasks, sparse or noisy tags, need semantic matching</td>
+<td><strong>llm_reasoned</strong> (pay tokens for understanding)</td>
+</tr>
+<tr>
+<td>anything production</td>
+<td>always pair the winner with a <strong>failure fallback</strong> and <strong>roster-completeness monitoring</strong> (ex5b)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The one caveat that beats every method:</strong> none of them detects a "vanished"
+agent — if a sub-agent is down when discovery runs, the Master silently routes
+to the wrong agent with zero error. Whichever method you pick, add liveness /
+roster monitoring on top; that single finding (ex5b) is worth more than any
+latency difference between the methods.</p>
 <hr />
 <h2 id="7-learning-points">7. Learning points</h2>
 <h3 id="71-design-lessons-the-answers">7.1 Design lessons (the answers)</h3>
