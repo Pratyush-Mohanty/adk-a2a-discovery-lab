@@ -35,11 +35,43 @@ them without a failure fallback.
 
 ---
 
-## 3. Each method in detail — advantages & disadvantages
+## 3. When accuracy is NOT a tie — the messy use cases
 
-### 3.1 static
+The "100% across the board" result is a property of the **benchmark**, not of
+the methods. It holds because our 12 tasks were hand-written to a well-tagged
+fleet (the best case). Real workloads routinely break that assumption, and then
+the methods split apart:
+
+| use case | static | card_discovery | registry_skill | cached | llm_reasoned |
+|---|---|---|---|---|---|
+| well-tagged tasks (benchmark) | ✅ 100% | ✅ 100% | ✅ 100% | ✅ 100% | ✅ 100% |
+| paraphrased task, wording not in any card | ✗ no tag to match | ~ weak overlap | ~ weak overlap | ~ same as card | ✅ reads the description |
+| sparse / noisy skills metadata | ✗ often misses | ~ weak signals | ~ weak signals | ~ weak signals | ✅ uses description semantics |
+| near-duplicate agents (overlapping skills) | ✗ picks wrong | ~ ranks wrong one first | ~ returns many, must disambiguate | ~ same as card | ✅ weighs nuance |
+| new / unseen task types | ✗ unknown tag | ~ fuzzy match only | ~ fuzzy match only | ~ fuzzy match only | ✅ generalizes |
+| task has no declared skill tag | ✗ cannot route | ~ keyword ranking only | ~ keyword ranking only | ~ keyword ranking only | ✅ reasons from description |
+| multi-intent / compound task | ✗ | ~ partial | ~ partial | ~ partial | ✅ handles it better |
+| large fleet, many similar agents | ✗ does not scale | ~ linear startup, weak ranking | ~ search narrows, ranking still weak | ~ same as card | ✅ reads every card |
+
+✅ handles it well · ~ degrades gracefully (partial / occasional misses) · ✗ breaks.
+
+**Read it this way:** the deterministic methods (static worst of all) depend on
+clean tags and keyword overlap, so they miss exactly when the real world is
+messy — paraphrases, sparse metadata, overlapping agents, unknown task types.
+The LLM is the only method that keeps scoring on semantics. **When accuracy
+ties, the cheap winner wins; when it doesn't, the LLM earns its tokens.**
+
+---
+
+## 4. Each method in detail — advantages & disadvantages
+
+### 4.1 static
 
 **How it works:** the Master ships with a hardcoded map `skill-tag → agent endpoint`.
+**Selection:** dict lookup on the task's declared tag; falls back to naive
+keyword ranking if the tag is unknown.
+**When it misses:** any task with no declared tag (nothing to look up), or
+rephrasing that doesn't match its keyword fallback.
 
 **Advantages**
 - Fastest possible: ~0.01 ms, zero network, zero tokens.
@@ -57,11 +89,15 @@ them without a failure fallback.
 
 ---
 
-### 3.2 card_discovery
+### 4.2 card_discovery
 
 **How it works:** at startup the Master fetches `/.well-known/agent-card.json`
 from every known endpoint, builds an in-memory `tag → agents` index, then ranks
 candidates per task (keyword overlap + exact-tag bonus).
+**Selection:** score = keyword overlap between task text and each card's skill
+tags/descriptions, plus a bonus for an exact `skill_tag`; sort and take the top.
+**When it misses:** paraphrases with no keyword overlap with any card; sparse
+or noisy skill metadata; an agent that was down at fetch time (never in roster).
 
 **Advantages**
 - **Data-driven**: the Agent Card (authored by the agent itself) is the source of truth — no manual syncing.
@@ -83,11 +119,15 @@ candidates per task (keyword overlap + exact-tag bonus).
 
 ---
 
-### 3.3 registry_skill (Agent Directory)
+### 4.3 registry_skill (Agent Directory)
 
 **How it works:** agents register their cards in a central directory; the Master
 queries it per request (`GET /agents/search?skill=<tag>`), mirroring Google
 Cloud Agent Registry's skill filters.
+**Selection:** the same keyword ranker as card_discovery, applied to whatever
+subset the directory returns (full-listing fallback if the search fails).
+**When it misses:** identical to card_discovery (it's still keyword-based), plus
+it depends on the directory being alive and the registration being up to date.
 
 **Advantages**
 - **Central source of truth** with dynamic register/unregister.
@@ -108,10 +148,14 @@ network round trip to answer a question the Master could answer in memory.
 
 ---
 
-### 3.4 cached (TTL-cached discovery)
+### 4.4 cached (TTL-cached discovery)
 
 **How it works:** wraps card/registry discovery with a TTL cache (30 s here);
 expired entries are re-fetched lazily, everything else is served from memory.
+**Selection:** the same in-memory index query as card_discovery, but served from
+a cache with a freshness window until the TTL fires.
+**When it misses:** identical to card_discovery (same ranker), plus anything
+that changes inside the TTL window (moved/dead endpoint served stale).
 
 **Advantages**
 - **Registry/card benefits at in-memory speed**: ~0.03 ms vs ~21 ms — the whole
@@ -134,12 +178,18 @@ especially on top of a registry.
 
 ---
 
-### 3.5 llm_reasoned (LLM selection)
+### 4.5 llm_reasoned (LLM selection)
 
 **How it works:** gathers the same discovered cards, then asks a free LLM
 (Ollama / any OpenAI-compatible endpoint) to pick the best agent for the task;
 token usage is recorded. Falls back to a deterministic scorer when no LLM is
 reachable.
+**Selection:** prompt the LLM with every card's name + description + skill tags
+("You are a routing dispatcher — reply with ONLY the agent name"); parse the
+reply. Fully semantic: understands paraphrase, ambiguity, and descriptions.
+**When it misses:** if the model names an agent that isn't in the roster
+(hallucination), or if no LLM is reachable and the mock scorer inherits the
+deterministic methods' weaknesses.
 
 **Advantages**
 - **Semantic understanding**: handles paraphrase, fuzzy or sparse tags, and can
@@ -161,7 +211,7 @@ or a clean, well-tagged fleet.
 
 ---
 
-## 4. The failure caveat that applies to ALL methods
+## 5. The failure caveat that applies to ALL methods
 
 Our experiments found the most dangerous failure mode is **not** a slow lookup —
 it is a **silent misroute**:
@@ -179,7 +229,7 @@ task, not just "next in the list").
 
 ---
 
-## 5. Rule-of-thumb summary
+## 6. Rule-of-thumb summary
 
 ```
 small fixed fleet          -> static

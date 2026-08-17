@@ -136,9 +136,103 @@ real measurements from the reference run (localhost, a2a-sdk 1.1.2).</p>
 big + governed → <strong>registry + cache</strong>; fuzzy → <strong>LLM</strong>; and never ship any of
 them without a failure fallback.</p>
 <hr />
-<h2 id="3-each-method-in-detail-advantages-disadvantages">3. Each method in detail — advantages &amp; disadvantages</h2>
-<h3 id="31-static">3.1 static</h3>
-<p><strong>How it works:</strong> the Master ships with a hardcoded map <code>skill-tag → agent endpoint</code>.</p>
+<h2 id="3-when-accuracy-is-not-a-tie-the-messy-use-cases">3. When accuracy is NOT a tie — the messy use cases</h2>
+<p>The "100% across the board" result is a property of the <strong>benchmark</strong>, not of
+the methods. It holds because our 12 tasks were hand-written to a well-tagged
+fleet (the best case). Real workloads routinely break that assumption, and then
+the methods split apart:</p>
+<table>
+<thead>
+<tr>
+<th>use case</th>
+<th>static</th>
+<th>card_discovery</th>
+<th>registry_skill</th>
+<th>cached</th>
+<th>llm_reasoned</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>well-tagged tasks (benchmark)</td>
+<td>✅ 100%</td>
+<td>✅ 100%</td>
+<td>✅ 100%</td>
+<td>✅ 100%</td>
+<td>✅ 100%</td>
+</tr>
+<tr>
+<td>paraphrased task, wording not in any card</td>
+<td>✗ no tag to match</td>
+<td>~ weak overlap</td>
+<td>~ weak overlap</td>
+<td>~ same as card</td>
+<td>✅ reads the description</td>
+</tr>
+<tr>
+<td>sparse / noisy skills metadata</td>
+<td>✗ often misses</td>
+<td>~ weak signals</td>
+<td>~ weak signals</td>
+<td>~ weak signals</td>
+<td>✅ uses description semantics</td>
+</tr>
+<tr>
+<td>near-duplicate agents (overlapping skills)</td>
+<td>✗ picks wrong</td>
+<td>~ ranks wrong one first</td>
+<td>~ returns many, must disambiguate</td>
+<td>~ same as card</td>
+<td>✅ weighs nuance</td>
+</tr>
+<tr>
+<td>new / unseen task types</td>
+<td>✗ unknown tag</td>
+<td>~ fuzzy match only</td>
+<td>~ fuzzy match only</td>
+<td>~ fuzzy match only</td>
+<td>✅ generalizes</td>
+</tr>
+<tr>
+<td>task has no declared skill tag</td>
+<td>✗ cannot route</td>
+<td>~ keyword ranking only</td>
+<td>~ keyword ranking only</td>
+<td>~ keyword ranking only</td>
+<td>✅ reasons from description</td>
+</tr>
+<tr>
+<td>multi-intent / compound task</td>
+<td>✗</td>
+<td>~ partial</td>
+<td>~ partial</td>
+<td>~ partial</td>
+<td>✅ handles it better</td>
+</tr>
+<tr>
+<td>large fleet, many similar agents</td>
+<td>✗ does not scale</td>
+<td>~ linear startup, weak ranking</td>
+<td>~ search narrows, ranking still weak</td>
+<td>~ same as card</td>
+<td>✅ reads every card</td>
+</tr>
+</tbody>
+</table>
+<p>✅ handles it well · ~ degrades gracefully (partial / occasional misses) · ✗ breaks.</p>
+<p><strong>Read it this way:</strong> the deterministic methods (static worst of all) depend on
+clean tags and keyword overlap, so they miss exactly when the real world is
+messy — paraphrases, sparse metadata, overlapping agents, unknown task types.
+The LLM is the only method that keeps scoring on semantics. <strong>When accuracy
+ties, the cheap winner wins; when it doesn't, the LLM earns its tokens.</strong></p>
+<hr />
+<h2 id="4-each-method-in-detail-advantages-disadvantages">4. Each method in detail — advantages &amp; disadvantages</h2>
+<h3 id="41-static">4.1 static</h3>
+<p><strong>How it works:</strong> the Master ships with a hardcoded map <code>skill-tag → agent endpoint</code>.
+<strong>Selection:</strong> dict lookup on the task's declared tag; falls back to naive
+keyword ranking if the tag is unknown.
+<strong>When it misses:</strong> any task with no declared tag (nothing to look up), or
+rephrasing that doesn't match its keyword fallback.</p>
 <p><strong>Advantages</strong>
 - Fastest possible: ~0.01 ms, zero network, zero tokens.
 - Trivially simple and deterministic — nothing to operate.
@@ -151,10 +245,14 @@ them without a failure fallback.</p>
 <p><strong>Use when:</strong> tiny fixed fleets, demos, pinned internal endpoints.
 <strong>Avoid when:</strong> anything that changes, scales, or involves more than one team.</p>
 <hr />
-<h3 id="32-card_discovery">3.2 card_discovery</h3>
+<h3 id="42-card_discovery">4.2 card_discovery</h3>
 <p><strong>How it works:</strong> at startup the Master fetches <code>/.well-known/agent-card.json</code>
 from every known endpoint, builds an in-memory <code>tag → agents</code> index, then ranks
-candidates per task (keyword overlap + exact-tag bonus).</p>
+candidates per task (keyword overlap + exact-tag bonus).
+<strong>Selection:</strong> score = keyword overlap between task text and each card's skill
+tags/descriptions, plus a bonus for an exact <code>skill_tag</code>; sort and take the top.
+<strong>When it misses:</strong> paraphrases with no keyword overlap with any card; sparse
+or noisy skill metadata; an agent that was down at fetch time (never in roster).</p>
 <p><strong>Advantages</strong>
 - <strong>Data-driven</strong>: the Agent Card (authored by the agent itself) is the source of truth — no manual syncing.
 - Near-zero per-request cost (~0.001 ms): all network paid once at setup.
@@ -171,10 +269,14 @@ candidates per task (keyword overlap + exact-tag bonus).</p>
 <p><strong>Use when:</strong> small/medium, changing fleets; simplicity + latency matter more than scale.
 <strong>Avoid when:</strong> very large fleets, or you need governed/shared discovery.</p>
 <hr />
-<h3 id="33-registry_skill-agent-directory">3.3 registry_skill (Agent Directory)</h3>
+<h3 id="43-registry_skill-agent-directory">4.3 registry_skill (Agent Directory)</h3>
 <p><strong>How it works:</strong> agents register their cards in a central directory; the Master
 queries it per request (<code>GET /agents/search?skill=&lt;tag&gt;</code>), mirroring Google
-Cloud Agent Registry's skill filters.</p>
+Cloud Agent Registry's skill filters.
+<strong>Selection:</strong> the same keyword ranker as card_discovery, applied to whatever
+subset the directory returns (full-listing fallback if the search fails).
+<strong>When it misses:</strong> identical to card_discovery (it's still keyword-based), plus
+it depends on the directory being alive and the registration being up to date.</p>
 <p><strong>Advantages</strong>
 - <strong>Central source of truth</strong> with dynamic register/unregister.
 - Governance, authentication, and validation in one place.
@@ -190,9 +292,13 @@ Cloud Agent Registry's skill filters.</p>
 <strong>Avoid when:</strong> tiny fleets or ultra-low-latency hot paths — you're paying a
 network round trip to answer a question the Master could answer in memory.</p>
 <hr />
-<h3 id="34-cached-ttl-cached-discovery">3.4 cached (TTL-cached discovery)</h3>
+<h3 id="44-cached-ttl-cached-discovery">4.4 cached (TTL-cached discovery)</h3>
 <p><strong>How it works:</strong> wraps card/registry discovery with a TTL cache (30 s here);
-expired entries are re-fetched lazily, everything else is served from memory.</p>
+expired entries are re-fetched lazily, everything else is served from memory.
+<strong>Selection:</strong> the same in-memory index query as card_discovery, but served from
+a cache with a freshness window until the TTL fires.
+<strong>When it misses:</strong> identical to card_discovery (same ranker), plus anything
+that changes inside the TTL window (moved/dead endpoint served stale).</p>
 <p><strong>Advantages</strong>
 - <strong>Registry/card benefits at in-memory speed</strong>: ~0.03 ms vs ~21 ms — the whole
   point of caching.
@@ -210,11 +316,17 @@ especially on top of a registry.
 <strong>Avoid when:</strong> lookups are rare and every answer must be perfectly fresh
 (correctness-critical, low QPS).</p>
 <hr />
-<h3 id="35-llm_reasoned-llm-selection">3.5 llm_reasoned (LLM selection)</h3>
+<h3 id="45-llm_reasoned-llm-selection">4.5 llm_reasoned (LLM selection)</h3>
 <p><strong>How it works:</strong> gathers the same discovered cards, then asks a free LLM
 (Ollama / any OpenAI-compatible endpoint) to pick the best agent for the task;
 token usage is recorded. Falls back to a deterministic scorer when no LLM is
-reachable.</p>
+reachable.
+<strong>Selection:</strong> prompt the LLM with every card's name + description + skill tags
+("You are a routing dispatcher — reply with ONLY the agent name"); parse the
+reply. Fully semantic: understands paraphrase, ambiguity, and descriptions.
+<strong>When it misses:</strong> if the model names an agent that isn't in the roster
+(hallucination), or if no LLM is reachable and the mock scorer inherits the
+deterministic methods' weaknesses.</p>
 <p><strong>Advantages</strong>
 - <strong>Semantic understanding</strong>: handles paraphrase, fuzzy or sparse tags, and can
   weigh a card's description/examples — not just keywords.
@@ -231,7 +343,7 @@ open-ended routing without maintaining a tag vocabulary.
 <strong>Avoid when:</strong> tight cost/latency budgets, deterministic guarantees required,
 or a clean, well-tagged fleet.</p>
 <hr />
-<h2 id="4-the-failure-caveat-that-applies-to-all-methods">4. The failure caveat that applies to ALL methods</h2>
+<h2 id="5-the-failure-caveat-that-applies-to-all-methods">5. The failure caveat that applies to ALL methods</h2>
 <p>Our experiments found the most dangerous failure mode is <strong>not</strong> a slow lookup —
 it is a <strong>silent misroute</strong>:</p>
 <ul>
@@ -246,7 +358,7 @@ you choose, add <strong>liveness / roster-completeness monitoring</strong> and a
 <strong>skill-aware fallback</strong> (fall back to the next agent that actually fits the
 task, not just "next in the list").</p>
 <hr />
-<h2 id="5-rule-of-thumb-summary">5. Rule-of-thumb summary</h2>
+<h2 id="6-rule-of-thumb-summary">6. Rule-of-thumb summary</h2>
 <pre><code>small fixed fleet          -&gt; static
 small/medium dynamic fleet -&gt; card_discovery          (simplest real discovery)
 large / governed fleet     -&gt; registry_skill           (source of truth + search)

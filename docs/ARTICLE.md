@@ -64,20 +64,96 @@ Each of the **12 benchmark tasks** (3 per agent) declares its expected agent, so
 routing correctness is scored objectively. Every strategy plugs into the same
 Master, runs the same tasks, and reports the same metrics.
 
-## The five discovery strategies, briefly
+## The five discovery strategies, in detail
 
-1. **Static** — a hardcoded `skill-tag → agent` map compiled into the Master.
-   No network. ~0.01 ms. The floor everything else must beat.
-2. **Card discovery** — at startup, fetch every endpoint's Agent Card, index
-   its skills in memory, then rank candidates per task (keyword overlap +
-   exact-tag bonus). ~0.001 ms per request; discovery cost paid once.
-3. **Registry skill search** — a central Agent Directory; per request, ask it
-   `GET /agents/search?skill=<tag>` (mirroring Google Cloud Agent Registry).
-   Real network round trip: ~21 ms.
-4. **Cached** — card/registry discovery behind a 30-second TTL cache. ~0.03 ms
-   per request, 36/36 hits in the run.
-5. **LLM-reasoned** — hand every card's name + description + skill tags to a
-   free LLM and let it pick. ~0.37 ms selection plus **2,266 tokens** per run.
+Every method runs the same Master loop — **discover → select → route** — and
+differs in the discover and select steps. Here is exactly how each one works
+and where each one breaks.
+
+### 1. Static mapping
+
+**Mechanism:** a hardcoded `skill-tag → agent endpoint` dict compiled into the
+Master. No network, no cards, no directory.
+
+**Selection:** a plain dict lookup on the task's declared tag; if the tag is
+unknown, it degrades to a naive keyword rank over all candidates.
+
+**Cost:** ~0.01 ms, 0 tokens.
+
+**Shines when:** the fleet is tiny, fixed, and known to the developer.
+**Breaks when:** anything changes (code change + redeploy), the task has no
+declared tag (nothing to look up), or an agent dies (routing just fails).
+
+### 2. Card discovery
+
+**Mechanism:** at startup, the Master fetches every endpoint's Agent Card at
+`/.well-known/agent-card.json`, parses its `skills[]`, and builds an in-memory
+`tag → agents` index. Discovery is paid once; per-request it is pure memory.
+
+**Selection:** score every candidate by keyword overlap between the task text
+and the card's skill tags/descriptions, add a bonus for an exact `skill_tag`
+match, sort, take the top agent.
+
+**Cost:** ~0.001 ms per request, 0 tokens.
+
+**Shines when:** small/medium fleets that change occasionally, where you want
+minimum latency and no central infrastructure.
+**Breaks when:** the task is paraphrased so badly that no keyword overlaps the
+card (fuzzy routing), or an agent is down *at fetch time* — it silently never
+enters the roster (the "vanished" failure).
+
+### 3. Registry skill search
+
+**Mechanism:** agents register their cards in a central Agent Directory; the
+Master queries it per request with `GET /agents/search?skill=<tag>`, falling
+back to a full `GET /agents` listing. Mirrors Google Cloud Agent Registry.
+
+**Selection:** the same keyword ranker as card discovery, applied to whatever
+subset the directory returns.
+
+**Cost:** ~21 ms per request (a real network round trip), 0 tokens.
+
+**Shines when:** large/dynamic fleets, multi-team setups, governance/auth/audit,
+and any place you want to search across agents by skill without contacting each
+one.
+**Breaks when:** you need per-request speed (four orders of magnitude slower
+than memory), or the directory is a single point of failure. The ranker is
+still keyword-based, so fuzzy tasks degrade just like card discovery.
+
+### 4. Cached discovery
+
+**Mechanism:** wraps card/registry discovery in a 30-second TTL cache, warmed at
+startup; expired entries are re-fetched lazily, everything else is served from
+memory.
+
+**Selection:** the same in-memory index query — with a staleness window until
+the TTL fires.
+
+**Cost:** ~0.03 ms per request, 0 tokens (36/36 cache hits in our run).
+
+**Shines when:** latency-sensitive production, hot paths, high QPS — especially
+on top of a registry, where it buys the registry's governance at memory speed.
+**Breaks when:** the TTL window serves a moved/dead endpoint, or (same as every
+method) a vanished agent was never cached in the first place.
+
+### 5. LLM-reasoned selection
+
+**Mechanism:** builds the same card index, then hands the LLM a routing prompt —
+*"You are a routing dispatcher. Reply with ONLY the agent name…"* — listing every
+card's name, description, and skill tags. The reply is parsed and validated; if
+no LLM is reachable it falls back to the deterministic scorer.
+
+**Selection:** fully semantic. It understands paraphrase, can weigh descriptions
+and examples, and generalizes to phrasing that never appears in any tag.
+
+**Cost:** ~0.37 ms selection plus **≈2,266 tokens** per 12-task run — the only
+method that spends tokens.
+
+**Shines when:** tasks are fuzzy, tags are sparse or noisy, agents overlap, or
+the domain is open-ended.
+**Breaks when:** you have a tight cost/latency budget, need deterministic
+behavior (an LLM can hallucinate a name that isn't in the roster), or your fleet
+is small and well-tagged (then it is pure overkill).
 
 ## What we did, run by run
 
@@ -102,10 +178,40 @@ We ran eight scenarios: the five strategies plus three failure drills.
 
 ![Token usage: only the LLM strategy spends any.](experiments/tokens.png)
 
+## When 100% is not guaranteed — where the methods split
+
+The "perfect score" is **not** a general law of the five methods. It only holds
+for our benchmark: 12 hand-written tasks aimed at a deliberately well-tagged
+fleet. That is the *best case*, not the general case. Change the use case and
+the methods split apart — fast.
+
+| use case | static | card_discovery | registry_skill | cached | llm_reasoned |
+|---|---|---|---|---|---|
+| well-tagged tasks (our benchmark) | ✅ 100% | ✅ 100% | ✅ 100% | ✅ 100% | ✅ 100% |
+| paraphrased task, wording not in any card | ✗ no tag to match | ~ weak keyword overlap | ~ weak keyword overlap | ~ same as card | ✅ reads the description |
+| sparse / noisy skills metadata | ✗ often misses | ~ weak signals | ~ weak signals | ~ weak signals | ✅ uses description semantics |
+| near-duplicate agents (overlapping skills) | ✗ picks wrong | ~ ranks wrong one first | ~ returns many, must disambiguate | ~ same as card | ✅ weighs nuance |
+| new / unseen task types | ✗ unknown tag, cannot route | ~ fuzzy match only | ~ fuzzy match only | ~ fuzzy match only | ✅ generalizes |
+| task has no declared skill tag | ✗ nothing to look up | ~ keyword ranking only | ~ keyword ranking only | ~ keyword ranking only | ✅ reasons from description |
+| multi-intent / compound task | ✗ | ~ partial | ~ partial | ~ partial | ✅ handles it better |
+| large fleet, many similar agents | ✗ does not scale | ~ linear startup, weak ranking | ~ search narrows it, ranking still weak | ~ same as card | ✅ reads every card |
+
+✅ handles it well · ~ degrades gracefully (partial / occasional misses) · ✗ breaks.
+
+So accuracy is only a **tie when your tasks are as clean as your tags**. The
+moment the real world shows up — paraphrases, sparse metadata, overlapping
+agents, unknown task types — the deterministic methods start missing, with
+**static breaking first** (it has nothing to fall back on) and the **LLM
+pulling ahead** (it understands intent, not just vocabulary). That is exactly
+when `llm_reasoned` earns its tokens.
+
 ## So which discovery method wins?
 
 On a well-tagged fleet, **accuracy is a tie** — all five methods hit 100%. The
-winner is therefore decided on cost and robustness, not on who "works".
+winner is therefore decided on cost and robustness, not on who "works". (As the
+previous section showed, on *messier* use cases accuracy stops being a tie and
+the LLM starts to win on semantics — the two halves of the picture: **cost
+wins when accuracy ties, semantics wins when it doesn't**.)
 
 | method | discovery cost | tokens | needs infra? | verdict |
 |---|---|---|---|---|
