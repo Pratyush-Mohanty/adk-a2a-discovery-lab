@@ -33,6 +33,7 @@ flexibility) → card discovery (one fetch per agent) → registry search (netwo
 per query) → cached (fast but stale) → LLM-reasoned (semantic but costs tokens).
 
 See **[docs/REPORT.md](docs/REPORT.md)** for the full end-to-end report (what we did, results, learning points),
+**[docs/COMPARISON.md](docs/COMPARISON.md)** for when-to-use-which + pros/cons of each method,
 **[docs/GUIDE.md](docs/GUIDE.md)** for the mechanism walkthrough, and
 **[docs/NOTES.md](docs/NOTES.md)** for the lab notebook.
 
