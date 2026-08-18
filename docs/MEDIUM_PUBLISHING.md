@@ -17,22 +17,21 @@ Medium strips table syntax; the result is a run-on paragraph of pipe
 characters.
 
 **Instead, per table, pick one:**
-- **Bold-key bullet list** — best for simple 2–4 row comparisons (survives
+- **ASCII box table in a code block** — best overall. A monospaced
+  ```` ```text ```` block preserves alignment on every device and is
+  copyable as text (the method used in the published article "The Agent
+  That Got Tricked by Data"). Generate it with
+  `py scripts/md_tables_to_ascii.py`.
+- **Bold-key bullet list** — fine for simple 2–4 row comparisons (survives
   paste as normal text).
-- **PNG image insert** — best for dense, visually-aligned data (render to PNG,
+- **PNG image insert** — good for dense, visually-aligned data (render to PNG,
   upload as an image; it looks identical on every device).
 - **Inline prose** — best for 2–3 row comparisons.
 
-For this article's tables:
-| table | publish as |
-|---|---|
-| The four assistants | bold-key bullet list |
-| Experiment ladder | bold-key bullet list |
-| Routing accuracy by request type (scoreboard) | PNG — `docs/medium_assets/table_matrix.png` |
-| Cheat sheet: situation → method | PNG — `docs/medium_assets/table_cheatsheet.png` |
-
-The PNGs are regenerated with `py scripts/tables_to_png.py` (auto-fitted, no
-overflow).
+For this article, the paste-ready version is **`docs/MEDIUM_ARTICLE_medium.md`**
+— all tables already converted to ASCII code blocks (regenerate it with
+`py scripts/md_tables_to_ascii.py`). Paste that file's content, then upload
+the images from `docs/medium_assets/` at the marked spots.
 
 ### 2. Headings
 
