@@ -623,6 +623,57 @@ point of my matrix experiment is that the answer to "which should I use?" is
 always "<strong>it depends, and here's what it depends on.</strong>" Word-matching is great
 when words match; meaning-matching is great when they don't; blending is great
 when you don't know. Choose based on your users' behavior, not on vibes.</p>
+<p>And this "silent but confident" failure isn't unique to agents. The same shape
+shows up everywhere data flows — a system that keeps producing answers that
+look right while quietly being wrong. Here's a table of the classic ones from
+the data world, what causes them, and the gates that catch them:</p>
+<table>
+<thead>
+<tr>
+<th>The trick</th>
+<th>Root cause</th>
+<th>Blast radius</th>
+<th>Stopped</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Semantic-Layer Injection</td>
+<td>Metadata treated as instruction</td>
+<td>Data exfiltration, unauthorized actions</td>
+<td>Gate 1</td>
+</tr>
+<tr>
+<td>Null-as-zero</td>
+<td>Silent upstream failure</td>
+<td>Inverted trend, wrong decision</td>
+<td>Gate 2</td>
+</tr>
+<tr>
+<td>Schema drift</td>
+<td>Enum/format changed underneath</td>
+<td>Silent under-count</td>
+<td>Gate 2</td>
+</tr>
+<tr>
+<td>Stale partition</td>
+<td>Data hasn't landed yet</td>
+<td>Incomplete period reported as final</td>
+<td>Gate 2</td>
+</tr>
+<tr>
+<td>Outlier / test row</td>
+<td>Unfiltered non-prod data</td>
+<td>Aggregates thrown into fiction</td>
+<td>Gate 2</td>
+</tr>
+</tbody>
+</table>
+<p>The pattern to steal: every failure mode gets a <strong>named gate</strong> that stops it —
+"null stays null (never zero)", "reject unknown enum values", "don't publish a
+period until its data has landed". Route your agent, but give it the same
+discipline: decide up front which silent failures are unacceptable, and put a
+gate in front of each one.</p>
 <hr />
 <h2>Try it yourself (it's free and runs offline)</h2>
 <p>The whole lab is open source. It runs on a normal laptop with no cloud, no API

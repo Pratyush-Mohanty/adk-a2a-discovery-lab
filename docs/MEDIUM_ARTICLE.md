@@ -438,6 +438,25 @@ always "**it depends, and here's what it depends on.**" Word-matching is great
 when words match; meaning-matching is great when they don't; blending is great
 when you don't know. Choose based on your users' behavior, not on vibes.
 
+And this "silent but confident" failure isn't unique to agents. The same shape
+shows up everywhere data flows — a system that keeps producing answers that
+look right while quietly being wrong. Here's a table of the classic ones from
+the data world, what causes them, and the gates that catch them:
+
+| The trick | Root cause | Blast radius | Stopped |
+|---|---|---|---|
+| Semantic-Layer Injection | Metadata treated as instruction | Data exfiltration, unauthorized actions | Gate 1 |
+| Null-as-zero | Silent upstream failure | Inverted trend, wrong decision | Gate 2 |
+| Schema drift | Enum/format changed underneath | Silent under-count | Gate 2 |
+| Stale partition | Data hasn't landed yet | Incomplete period reported as final | Gate 2 |
+| Outlier / test row | Unfiltered non-prod data | Aggregates thrown into fiction | Gate 2 |
+
+The pattern to steal: every failure mode gets a **named gate** that stops it —
+"null stays null (never zero)", "reject unknown enum values", "don't publish a
+period until its data has landed". Route your agent, but give it the same
+discipline: decide up front which silent failures are unacceptable, and put a
+gate in front of each one.
+
 ---
 
 ## Try it yourself (it's free and runs offline)
