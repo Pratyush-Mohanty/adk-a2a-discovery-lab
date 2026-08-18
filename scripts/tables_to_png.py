@@ -64,33 +64,75 @@ def wrap(text: str, width: int) -> str:
     return "\n".join(lines)
 
 
+CHAR_W = 6.9        # avg char width (pts) at fontsize 11
+CHAR_W_BOLD = 7.7   # avg char width for bold header text
+ROW_PT = 16.0       # row height (pts) after vertical scale
+
+
+def wrap_pt(text: str, width_pt: float, char_w: float) -> int:
+    """Greedy word-wrap so each line's estimated width fits width_pt."""
+    lines = []
+    cur = ""
+    for word in text.split():
+        trial = f"{cur} {word}".strip()
+        if len(trial) * char_w <= width_pt:
+            cur = trial
+        else:
+            if cur:
+                lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines), len(lines)
+
+
 def render(rows, title: str, out_path: Path):
     header = rows[0]
     data = rows[1:]
     ncols = len(header)
     nrows = len(data)
 
-    col_widths = [len(h) for h in header]
-    for row in data:
-        for c, cell in enumerate(row):
-            col_widths[c] = max(col_widths[c], len(cell))
-    for c in range(ncols):
-        col_widths[c] = min(max(col_widths[c], 10), 30)
+    natural = []
+    for c, h in enumerate(header):
+        longest = max([len(r[c]) for r in data] + [len(h)])
+        natural.append(longest + 3)
 
-    wrapped_header = [wrap(h, 26) for h in header]
-    wrapped_rows = [
-        [wrap(cell, col_widths[c]) for c, cell in enumerate(row)] for row in data
-    ]
+    figw_in = min(14.0, max(7.0, ncols * 2.9))
+    total_pt = figw_in * 72.0
+    weights = [max(n, 10) for n in natural]
+    col_pt = [total_pt * w / sum(weights) for w in weights]
+    col_frac = [w / sum(weights) for w in weights]
 
-    fig, ax = plt.subplots(
-        figsize=(max(7.0, ncols * 2.8), max(2.2, (nrows + 1) * 0.62))
-    )
+    header_wrapped = []
+    header_lines = 0
+    for c, h in enumerate(header):
+        txt, n = wrap_pt(h, col_pt[c] * 0.88, CHAR_W_BOLD)
+        header_wrapped.append(txt)
+        header_lines = max(header_lines, n)
+
+    rows_wrapped = []
+    body_lines = []
+    for r in data:
+        wrapped = []
+        nlines = 0
+        for c, cell in enumerate(r):
+            txt, n = wrap_pt(cell, col_pt[c] * 0.88, CHAR_W)
+            wrapped.append(txt)
+            nlines = max(nlines, n)
+        rows_wrapped.append(wrapped)
+        body_lines.append(nlines)
+
+    total_rows = header_lines + sum(body_lines)
+    figh_in = 0.9 + total_rows * ROW_PT / 72.0
+
+    fig, ax = plt.subplots(figsize=(figw_in, figh_in))
     ax.axis("off")
     ax.set_title(title, fontsize=13, fontweight="bold", color="#1f3864", pad=14)
 
     table = ax.table(
-        cellText=wrapped_rows,
-        colLabels=wrapped_header,
+        cellText=rows_wrapped,
+        colLabels=header_wrapped,
+        colWidths=col_frac,
         loc="center",
         cellLoc="left",
         colLoc="left",
