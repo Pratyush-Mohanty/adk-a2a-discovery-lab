@@ -120,16 +120,32 @@ class StaticStrategy(DiscoveryStrategy):
 
     def __init__(self) -> None:
         self._map: dict[str, AgentInfo] = {}
+        self._all: list[AgentInfo] = []
 
     async def setup(self) -> None:
         for spec in build_fleet():
             info = AgentInfo(spec.name, spec.description, spec.card_url, spec.url)
+            self._all.append(info)
             for tag in spec.skill_tags():
                 self._map[tag] = info
 
+    @staticmethod
+    def _spec_card(info: AgentInfo) -> dict:
+        # rank over full cards (with skills) so keyword scoring has signal,
+        # while routing still uses the real endpoint URL from AgentInfo.
+        spec = next(s for s in build_fleet() if s.name == info.name)
+        return {
+            "name": spec.name,
+            "description": spec.description,
+            "skills": [
+                {"name": s.name, "description": s.description, "tags": list(s.tags)}
+                for s in spec.skills
+            ],
+        }
+
     async def resolve(self, task: TaskSpec, *, exclude: set[str] | None = None) -> Resolution:
         start = time.perf_counter()
-        seen: dict[str, AgentInfo] = {i.name: i for i in self._map.values()}
+        seen: dict[str, AgentInfo] = {i.name: i for i in self._all}
         candidates = list(seen.values())
         if exclude:
             candidates = [c for c in candidates if c.name not in exclude]
@@ -139,7 +155,8 @@ class StaticStrategy(DiscoveryStrategy):
         if exclude and agent and agent.name in exclude:
             agent = None
         if not agent and candidates:
-            agent = _pick(_rank(task, [c.slim() for c in candidates]))
+            ranked_cards = _rank(task, [self._spec_card(c) for c in candidates])
+            agent = next((c for c in candidates if c.name == ranked_cards[0].name), None)
         selection_ms = (time.perf_counter() - start) * 1000
         return Resolution(self.name, task.id, agent, candidates, discovery_ms, selection_ms)
 
@@ -340,12 +357,269 @@ class LLMReasonedStrategy(CardDiscoveryStrategy):
         )
 
 
+# --------------------------------------------------------------------------
+# Research-backed strategies
+# (BM25 / dense-semantic / hybrid-RRF, from the tool-retrieval literature)
+# --------------------------------------------------------------------------
+def _card_doc(card: dict) -> str:
+    """Rich text document per agent card: name + description + skills.
+
+    Mirrors the "document construction" step of the MCP semantic tool
+    discovery paper (embed tool/agent name, purpose, capabilities, params).
+    """
+    parts = [card.get("name", ""), card.get("description", "")]
+    for s in card.get("skills", []):
+        parts.append(s.get("name", ""))
+        parts.append(s.get("description", ""))
+        parts.extend(s.get("tags", []))
+    return " ".join(str(p) for p in parts if p)
+
+
+def _tokenize(text: str) -> list[str]:
+    import re
+
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+class BM25Index:
+    """Compact Okapi BM25 over a document corpus (no external deps)."""
+
+    def __init__(self, docs: list[list[str]], k1: float = 1.5, b: float = 0.75) -> None:
+        self.docs = docs
+        self.k1, self.b = k1, b
+        self.n = len(docs)
+        self.avgdl = sum(len(d) for d in docs) / self.n if self.n else 0.0
+        df: dict[str, int] = {}
+        for d in docs:
+            for t in set(d):
+                df[t] = df.get(t, 0) + 1
+        self.df = df
+        self.idf = {t: _idf(self.n, f) for t, f in df.items()}
+        self.tfs = [dict(_freq(d)) for d in docs]
+
+    def score(self, query: list[str], doc_idx: int) -> float:
+        dl = len(self.docs[doc_idx]) or 1.0
+        tf_map = self.tfs[doc_idx]
+        total = 0.0
+        for t in query:
+            tf = tf_map.get(t, 0)
+            if tf == 0 or t not in self.idf:
+                continue
+            num = tf * (self.k1 + 1)
+            den = tf + self.k1 * (1 - self.b + self.b * dl / (self.avgdl or 1.0))
+            total += self.idf[t] * num / den
+        return total
+
+    def rank(self, query: list[str]) -> list[int]:
+        scored = [(i, self.score(query, i)) for i in range(self.n)]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [i for i, _ in scored]
+
+
+def _idf(n: int, df: int) -> float:
+    import math
+
+    return math.log(1 + (n - df + 0.5) / (df + 0.5))
+
+
+def _freq(tokens: list[str]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for t in tokens:
+        out[t] = out.get(t, 0) + 1
+    return out
+
+
+class _TextEmbedder:
+    """Lazy wrapper around fastembed; returns None when unavailable."""
+
+    _model = None
+
+    def embed(self, texts: list[str]) -> list[list[float]] | None:
+        try:
+            if self._model is None:
+                from fastembed import TextEmbedding
+
+                self._model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
+            return [list(v) for v in self._model.embed(texts)]
+        except Exception:
+            return None
+
+
+_EMBEDDER = _TextEmbedder()
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    import math
+
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def _rrf(rankings: list[list[int]], k: int = 60) -> list[int]:
+    """Reciprocal Rank Fusion over several ranked lists of doc indices."""
+    import collections
+
+    scores: collections.Counter[int] = collections.Counter()
+    for ranking in rankings:
+        for pos, idx in enumerate(ranking):
+            scores[idx] += 1.0 / (k + pos + 1)
+    return [idx for idx, _ in scores.most_common()]
+
+
+class BM25Strategy(CardDiscoveryStrategy):
+    """Sparse lexical retrieval (Okapi BM25) over agent-card documents.
+
+    From the tool-retrieval literature (Tool-to-Agent Retrieval,
+    Agent-as-a-Graph): BM25 is the classic sparse baseline for matching a
+    request against tool/agent descriptions.
+    """
+
+    name = "bm25"
+
+    def __init__(self, base_urls: list[str] | None = None) -> None:
+        super().__init__(base_urls)
+        self._index: BM25Index | None = None
+        self._card_by_idx: list[dict] = []
+
+    async def setup(self) -> None:
+        await super().setup()
+        docs = [_tokenize(_card_doc(c)) for c in self._cards]
+        self._index = BM25Index(docs)
+        self._card_by_idx = list(self._cards)
+
+    def _rank(self, task: TaskSpec) -> list[AgentInfo]:
+        assert self._index is not None
+        idx_order = self._index.rank(_tokenize(task.text))
+        return [_to_agent_info(self._card_by_idx[i]) for i in idx_order]
+
+    async def resolve(self, task: TaskSpec, *, exclude: set[str] | None = None) -> Resolution:
+        start = time.perf_counter()
+        cards = list(self._cards)
+        if exclude:
+            cards = [c for c in cards if c["name"] not in exclude]
+        discovery_ms = (time.perf_counter() - start) * 1000
+        start = time.perf_counter()
+        ranked = self._rank(task)
+        if exclude:
+            ranked = [r for r in ranked if r.name not in exclude]
+        agent = _pick(ranked)
+        selection_ms = (time.perf_counter() - start) * 1000
+        return Resolution(self.name, task.id, agent, ranked, discovery_ms, selection_ms)
+
+
+class SemanticStrategy(CardDiscoveryStrategy):
+    """Dense semantic retrieval: embed cards once, cosine-search per task.
+
+    From the MCP semantic tool discovery paper and Tool-to-Agent Retrieval:
+    vector-based retrieval selects the top-k agents by embedding similarity,
+    which generalizes across paraphrases and sparse metadata.
+    """
+
+    name = "semantic"
+
+    def __init__(self, base_urls: list[str] | None = None) -> None:
+        super().__init__(base_urls)
+        self._doc_vecs: list[list[float]] = []
+        self._card_by_idx: list[dict] = []
+        self._embedder = _EMBEDDER
+
+    async def setup(self) -> None:
+        await super().setup()
+        if not self._cards:
+            return
+        vecs = self._embedder.embed([_card_doc(c) for c in self._cards])
+        if vecs is None:
+            logger.warning("semantic: embeddings unavailable -> fallback to keyword scoring")
+        self._doc_vecs = vecs or []
+        self._card_by_idx = list(self._cards)
+
+    def _rank(self, task: TaskSpec) -> list[AgentInfo]:
+        if not self._doc_vecs:
+            return _rank(task, list(self._cards))
+        q = self._embedder.embed([task.text])
+        if q is None:
+            return _rank(task, list(self._cards))
+        scores = [_cosine(q[0], v) for v in self._doc_vecs]
+        order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+        return [_to_agent_info(self._card_by_idx[i]) for i in order]
+
+    async def resolve(self, task: TaskSpec, *, exclude: set[str] | None = None) -> Resolution:
+        start = time.perf_counter()
+        cards = list(self._cards)
+        if exclude:
+            cards = [c for c in cards if c["name"] not in exclude]
+        discovery_ms = (time.perf_counter() - start) * 1000
+        start = time.perf_counter()
+        ranked = self._rank(task)
+        if exclude:
+            ranked = [r for r in ranked if r.name not in exclude]
+        agent = _pick(ranked)
+        selection_ms = (time.perf_counter() - start) * 1000
+        return Resolution(self.name, task.id, agent, ranked, discovery_ms, selection_ms)
+
+
+class HybridStrategy(CardDiscoveryStrategy):
+    """BM25 + dense embeddings fused with Reciprocal Rank Fusion.
+
+    From Tool-to-Agent Retrieval / Agent-as-a-Graph: hybrid lexical + semantic
+    retrieval with rank fusion combines the exact-match strength of sparse
+    retrieval with the paraphrase robustness of dense retrieval.
+    """
+
+    name = "hybrid"
+
+    def __init__(self, base_urls: list[str] | None = None) -> None:
+        super().__init__(base_urls)
+        self._bm25: BM25Index | None = None
+        self._doc_vecs: list[list[float]] = []
+        self._card_by_idx: list[dict] = []
+        self._embedder = _EMBEDDER
+
+    async def setup(self) -> None:
+        await super().setup()
+        docs = [_tokenize(_card_doc(c)) for c in self._cards]
+        self._bm25 = BM25Index(docs)
+        self._card_by_idx = list(self._cards)
+        vecs = self._embedder.embed([_card_doc(c) for c in self._cards])
+        self._doc_vecs = vecs or []
+
+    def _rank(self, task: TaskSpec) -> list[AgentInfo]:
+        assert self._bm25 is not None
+        rankings = [self._bm25.rank(_tokenize(task.text))]
+        q = self._embedder.embed([task.text]) if self._doc_vecs else None
+        if q is not None:
+            scores = [_cosine(q[0], v) for v in self._doc_vecs]
+            dense_rank = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+            rankings.append(dense_rank)
+        order = _rrf(rankings)
+        return [_to_agent_info(self._card_by_idx[i]) for i in order]
+
+    async def resolve(self, task: TaskSpec, *, exclude: set[str] | None = None) -> Resolution:
+        start = time.perf_counter()
+        cards = list(self._cards)
+        if exclude:
+            cards = [c for c in cards if c["name"] not in exclude]
+        discovery_ms = (time.perf_counter() - start) * 1000
+        start = time.perf_counter()
+        ranked = self._rank(task)
+        if exclude:
+            ranked = [r for r in ranked if r.name not in exclude]
+        agent = _pick(ranked)
+        selection_ms = (time.perf_counter() - start) * 1000
+        return Resolution(self.name, task.id, agent, ranked, discovery_ms, selection_ms)
+
+
 STRATEGIES = {
     "static": StaticStrategy,
     "card_discovery": CardDiscoveryStrategy,
     "registry_skill": RegistrySkillStrategy,
     "cached": CachedDiscoveryStrategy,
     "llm_reasoned": LLMReasonedStrategy,
+    "bm25": BM25Strategy,
+    "semantic": SemanticStrategy,
+    "hybrid": HybridStrategy,
 }
 
 

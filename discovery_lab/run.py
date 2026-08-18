@@ -24,7 +24,8 @@ from .experiments import ALL_TASKS, run_experiments, run_single
 from .launch import FleetRuntime
 from .llm_client import LLMClient
 from .metrics import ExperimentSummary, RunResult, summarize
-from .plot import plot_summary
+from .plot import plot_summary, plot_usecase_matrix
+from .usecases import matrix_report, run_matrix
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -61,6 +62,15 @@ async def _main(args: argparse.Namespace) -> None:
             print(s.to_dict())
         if args.plot and summaries:
             plot_summary(summaries, out_dir)
+
+        # Use-case matrix: strategy x task set (well-tagged / paraphrased / noisy)
+        matrix_summaries, matrix_runs = await run_matrix(llm=llm)
+        _save(out_dir, "matrix_summary", [s.to_dict() for s in matrix_summaries])
+        _save(out_dir, "matrix_runs", [r.to_dict() for r in matrix_runs])
+        print("\n--- use-case matrix (accuracy % by task set) ---")
+        print(matrix_report(matrix_summaries))
+        if args.plot and matrix_summaries:
+            plot_usecase_matrix(matrix_summaries, out_dir)
     finally:
         await runtime.stop()
 

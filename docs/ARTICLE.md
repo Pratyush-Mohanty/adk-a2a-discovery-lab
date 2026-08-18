@@ -155,6 +155,45 @@ the domain is open-ended.
 behavior (an LLM can hallucinate a name that isn't in the roster), or your fleet
 is small and well-tagged (then it is pure overkill).
 
+### 6. BM25 — sparse lexical retrieval (from the research)
+
+Searching the agent-discovery literature surfaced three more methods worth
+comparing — all from the tool-retrieval line of work (Tool-to-Agent Retrieval,
+Agent-as-a-Graph, semantic MCP tool discovery). We implemented all three.
+
+**Mechanism:** tokenize each Agent Card (name + description + skill names +
+tags) into a document; rank tasks with **Okapi BM25** (k1=1.5, b=0.75) — the
+classic sparse-retrieval baseline from the papers.
+**Cost:** ~0.2 ms selection, 0 tokens. Pure Python, no model.
+**Strengths:** the best *lexical* matcher (92% on well-tagged, 75% on noisy in
+our tests).
+**Weakness:** vocabulary-bound — a paraphrased task shares no words with the
+card and it fails (33%).
+
+### 7. Semantic — dense embeddings (from the research)
+
+**Mechanism:** embed every card once at startup (fastembed,
+all-MiniLM-L6-v2, offline); per task, embed the request and take the highest
+cosine similarity — the vector-retrieval approach of the MCP semantic tool
+discovery paper.
+**Cost:** ~30–66 ms selection (an embedding per request), 0 tokens.
+**Strengths:** understands paraphrase (75% on our paraphrased set vs 33% for
+every lexical method) and needs no tag vocabulary.
+**Weakness:** the slowest non-LLM method, weakest on keyword-rich and noisy
+tasks (75% / 58%) — embeddings ignore the exact-tag signal lexical methods
+exploit.
+
+### 8. Hybrid — BM25 + semantic with Reciprocal Rank Fusion (from the research)
+
+**Mechanism:** run BM25 and the dense embedder, fuse the two ranked lists with
+**Reciprocal Rank Fusion** (k=60) — the hybrid-retrieval recipe of
+Tool-to-Agent Retrieval / Agent-as-a-Graph.
+**Cost:** ~40–76 ms selection, 0 tokens.
+**Strengths:** the **only method ≥75% accuracy in every regime we tested** —
+it combines exact-keyword strength with paraphrase robustness.
+**Weakness:** the most expensive non-LLM method (two embeddings + BM25 +
+fusion), and two things to tune.
+
 ## What we did, run by run
 
 We ran eight scenarios: the five strategies plus three failure drills.
@@ -205,27 +244,64 @@ agents, unknown task types — the deterministic methods start missing, with
 pulling ahead** (it understands intent, not just vocabulary). That is exactly
 when `llm_reasoned` earns its tokens.
 
+## The measured verdict: we ran the matrix
+
+We didn't just speculate — we turned the "when" into an experiment. Three task
+sets (well-tagged, paraphrased, noisy) × every method = a 15-cell accuracy
+matrix, run on the real fleet:
+
+![Accuracy by use case: keyword methods win when tags match the text; semantic and hybrid win when the request is paraphrased; hybrid is the only method that stays >= 75% everywhere.](experiments/accuracy_by_usecase.png)
+
+| task set | static | card_discovery | bm25 | semantic | hybrid |
+|---|---|---|---|---|---|
+| **well_tagged** (tags match text) | **100%** | **100%** | 92% | 75% | 83% |
+| **paraphrased** (no shared vocab, no tag) | 33% | 33% | 33% | **75%** | **83%** |
+| **noisy** (wrong-agent keywords) | 58% | 58% | **75%** | 58% | **75%** |
+
+Three things fall out:
+
+1. **When tags match the text, lexical wins.** BM25 and card discovery are the
+   cheapest accurate methods on well-tagged tasks — and embeddings are the
+   *weakest* (75%) *and* the slowest (+30–66 ms). If your tasks are keyword-y,
+   don't pay for semantics.
+2. **When the request is paraphrased, semantics win.** All three lexical
+   methods drop to 33% (random on 4 agents); semantic hits 75% and hybrid 83%.
+   This is exactly where embeddings earn their latency, and where an LLM would
+   earn its tokens.
+3. **When tasks are noisy, hybrid is king.** Dense-only falls to 58% because a
+   wrong-agent keyword pulls the vector toward the wrong card; BM25 and hybrid
+   hold 75%. **Hybrid is the only method ≥75% in every regime** — the robust
+   default, mirroring the "hybrid retrieval + rank fusion" recommendation in
+   the tool-retrieval papers (and LLMRouterBench's finding that no single
+   router dominates).
+
 ## So which discovery method wins?
 
-On a well-tagged fleet, **accuracy is a tie** — all five methods hit 100%. The
-winner is therefore decided on cost and robustness, not on who "works". (As the
-previous section showed, on *messier* use cases accuracy stops being a tie and
-the LLM starts to win on semantics — the two halves of the picture: **cost
-wins when accuracy ties, semantics wins when it doesn't**.)
+On a well-tagged fleet, **accuracy is a tie** — all five original methods hit
+100%. The winner is therefore decided on cost and robustness, not on who
+"works". (The measured matrix above showed that on *messier* use cases accuracy
+stops being a tie: **cost wins when accuracy ties, semantics wins when it
+doesn't** — and hybrid is the only method that stays strong in both worlds.)
 
 | method | discovery cost | tokens | needs infra? | verdict |
 |---|---|---|---|---|
 | static | ~0.01 ms | 0 | no | great floor, zero dynamism |
 | **card_discovery** | ~0.001 ms | 0 | no | **runner-up for small fleets** |
 | registry_skill | **20.7 ms** | 0 | yes (directory) | right for scale, slow per lookup |
-| **cached** | ~0.03 ms | 0 | cache only | **🏆 overall winner** |
-| llm_reasoned | 0.37 ms | **2,266** | yes (LLM) | wins only on semantics |
+| **cached** | ~0.03 ms | 0 | cache only | **🏆 cost winner on well-tagged fleets** |
+| bm25 | ~0.2 ms | 0 | no | best lexical; fails on paraphrase |
+| semantic | 30–66 ms | 0 | embedding model | wins on paraphrased tasks |
+| **hybrid** | 40–76 ms | 0 | embedding model | **🏆 robust winner (≥75% everywhere)** |
+| llm_reasoned | 0.37 ms | **2,266** | yes (LLM) | wins only on deep semantics |
 
-**The winner: cached card discovery.** It matches static and card discovery's
-near-zero per-request latency, spends zero tokens, and — unlike static — keeps
-working when the roster changes, because it re-fetches cards on TTL expiry.
-For a small, stable fleet the runner-up is plain **card discovery**: equally
-accurate and fast, and simpler (no TTL machinery).
+**The two winners, by use case.** On a stable, well-tagged fleet — the case the
+original lab measured — **cached card discovery** still wins: 100% accuracy at
+~0.03 ms and zero tokens. But the research extensions changed the *general*
+answer: across the three measured use cases, **hybrid (BM25 + semantic with
+rank fusion)** is the only method that never drops below 75%, which makes it
+the robust default for fleets whose workloads you don't fully control. For a
+small, stable fleet the runner-up remains plain **card discovery**: equally
+accurate and fast, and simpler (no TTL machinery, no embedding model).
 
 But there is no single winner for every deployment. The decision actually maps
 to your situation:
@@ -233,9 +309,11 @@ to your situation:
 | your situation | use this |
 |---|---|
 | tiny fixed fleet, endpoints known | **static** (or just card discovery) |
-| small/medium fleet that changes; want latency + simplicity | **card_discovery** |
-| large/dynamic fleet; governance + search without touching Masters | **registry_skill + cache** |
-| fuzzy/ambiguous tasks, sparse/noisy tags | **llm_reasoned** (pay tokens for understanding) |
+| tag-rich / exact-keyword tasks | **bm25 or card_discovery** |
+| paraphrased requests, sparse tags | **semantic** |
+| noisy / unknown workload | **hybrid** (the safe default) |
+| large/dynamic fleet; governance + search | **registry_skill + cache** |
+| deeply fuzzy/ambiguous tasks | **llm_reasoned** (pay tokens for understanding) |
 | production | any + **failure fallback + liveness monitoring** |
 
 ## The one finding that beats every method

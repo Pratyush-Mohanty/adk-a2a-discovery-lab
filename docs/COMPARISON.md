@@ -6,7 +6,7 @@ real measurements from the reference run (localhost, a2a-sdk 1.1.2).
 
 ---
 
-## 1. The five methods at a glance
+## 1. The methods at a glance
 
 | method | how it finds agents | measured discovery cost | tokens | best for |
 |---|---|---|---|---|
@@ -14,7 +14,14 @@ real measurements from the reference run (localhost, a2a-sdk 1.1.2).
 | **card_discovery** | fetch each endpoint's Agent Card at startup, index skills | ~0.001 ms/request (paid once at setup) | 0 | small/medium fleets that change |
 | **registry_skill** | query a central Agent Directory by skill tag | **~20.7 ms/request** (network round trip) | 0 | large/dynamic fleets, governance |
 | **cached** | card/registry answers behind a TTL cache | ~0.03 ms/request | 0 | latency-sensitive production |
+| **bm25** (research) | sparse lexical ranking (Okapi BM25) of task vs card docs | ~0.2 ms | 0 | exact keyword / tag-rich tasks |
+| **semantic** (research) | dense embeddings: cosine between task and card vectors | ~30–66 ms selection (embedding) | 0 | paraphrased / sparse-metadata tasks |
+| **hybrid** (research) | BM25 + semantic fused with Reciprocal Rank Fusion | ~40–76 ms selection | 0 | the robust default (≥75% everywhere) |
 | **llm_reasoned** | an LLM reads the cards and decides | ~0.37 ms + **2,266 tokens**/run | yes | fuzzy/ambiguous tasks |
+
+The **bm25 / semantic / hybrid** methods come from the tool-retrieval
+literature (Tool-to-Agent Retrieval, Agent-as-a-Graph, MCP semantic tool
+discovery) and were implemented for this lab (`discovery_lab/strategies.py`).
 
 ---
 
@@ -24,14 +31,18 @@ real measurements from the reference run (localhost, a2a-sdk 1.1.2).
 |---|---|---|---|
 | 1 | Tiny fixed fleet, endpoints known forever, want zero machinery | **static** | nothing to run, nothing to go stale by accident, 0.01 ms |
 | 2 | Small/medium fleet that changes occasionally; want minimum latency + simplicity | **card_discovery** | cards are the source of truth, one fetch per agent at startup, ~0 ms per request |
-| 3 | Large / multi-team fleet; agents join & leave; need governance, auth, search | **registry_skill** | central catalog you can filter by skill tags; Masters only know one URL |
-| 4 | Same as #3 but you care about per-request latency / load on the directory | **cached** (registry-backed) | keeps the registry as source of truth, adds in-memory speed |
-| 5 | Tasks are fuzzy, tags are sparse/noisy, need semantic understanding | **llm_reasoned** | an LLM can understand paraphrases and weigh descriptions, not just tags |
-| 6 | Everything reliability-critical | any + **failure fallback + liveness monitoring** | no method detects a "vanished" agent (see §4) |
+| 3 | Tasks are tag-rich / exact keywords (well-tagged) | **bm25 or card_discovery** | sparse lexical retrieval is the cheapest that's accurate here |
+| 4 | Tasks are paraphrased, no shared vocabulary with the tags | **semantic or hybrid** | embeddings understand intent, not just vocabulary |
+| 5 | Tasks are compound / noisy (keywords from the wrong agents) | **bm25 or hybrid** | dense-only gets confused by distractors; hybrid is the safe pick |
+| 6 | Don't know the workload → need one method that works everywhere | **hybrid** | the only method ≥75% accuracy in every regime we tested |
+| 7 | Large / multi-team fleet; agents join & leave; need governance, auth, search | **registry_skill** | central catalog you can filter by skill tags; Masters only know one URL |
+| 8 | Same as #7 but you care about per-request latency / load on the directory | **cached** (registry-backed) | keeps the registry as source of truth, adds in-memory speed |
+| 9 | Tasks are deeply fuzzy, tags are sparse/noisy, need semantic understanding | **llm_reasoned** | an LLM can understand paraphrases and weigh descriptions, not just tags |
+| 10 | Everything reliability-critical | any + **failure fallback + liveness monitoring** | no method detects a "vanished" agent (see §5) |
 
-**If you remember one line:** small + simple → **card_discovery**;
-big + governed → **registry + cache**; fuzzy → **LLM**; and never ship any of
-them without a failure fallback.
+**If you remember one line:** tag-rich → **BM25/card**; paraphrased → **semantic**;
+noisy/unknown → **hybrid**; large+governed → **registry + cache**; fuzzy → **LLM**;
+and never ship any of them without a failure fallback.
 
 ---
 
@@ -60,6 +71,27 @@ clean tags and keyword overlap, so they miss exactly when the real world is
 messy — paraphrases, sparse metadata, overlapping agents, unknown task types.
 The LLM is the only method that keeps scoring on semantics. **When accuracy
 ties, the cheap winner wins; when it doesn't, the LLM earns its tokens.**
+
+### 3.1 Measured results (accuracy %, 12 tasks per cell, this lab)
+
+| task set | static | card_discovery | bm25 | semantic | hybrid |
+|---|---|---|---|---|---|
+| well_tagged (tags match text) | **100** | **100** | 92 | 75 | 83 |
+| paraphrased (no shared vocab, no tag) | 33 | 33 | 33 | **75** | **83** |
+| noisy (wrong-agent keywords) | 58 | 58 | **75** | 58 | **75** |
+
+- well_tagged → keyword/tag methods win; embeddings are weakest *and* slowest.
+- paraphrased → **semantic / hybrid** beat lexical 33% — embeddings earn their
+  +30–66 ms selection latency here.
+- noisy → **bm25 and hybrid** win; dense-only drops to 58% (distractors pull
+  the embedding toward the wrong agent).
+- **hybrid ≥75% in every regime** → the robust default. This mirrors the
+  literature: Tool-to-Agent Retrieval / Agent-as-a-Graph report hybrid
+  lexical+dense with rank fusion beating either alone, and LLMRouterBench
+  reports no single router dominates.
+
+Charts: `experiments/accuracy_by_usecase.png`, `selection_by_usecase.png`,
+`tokens_by_usecase.png`.
 
 ---
 
@@ -178,7 +210,88 @@ especially on top of a registry.
 
 ---
 
-### 4.5 llm_reasoned (LLM selection)
+### 4.5 bm25 (sparse lexical retrieval — from the research)
+
+**How it works:** tokenizes each card (name + description + skill names + tags)
+into a document and ranks tasks with Okapi BM25 (k1=1.5, b=0.75) — the classic
+sparse retrieval baseline from Tool-to-Agent Retrieval / Agent-as-a-Graph.
+**Selection:** BM25 score = TF-IDF-weighted lexical match between task and
+card document; take the top card.
+**When it misses:** paraphrases that share no vocabulary with the card (33% on
+our paraphrased set); it can only match words it has literally seen.
+
+**Advantages**
+- Pure Python, no model, no network per request (~0.2 ms selection).
+- Best-in-class *lexical* accuracy: 92% well-tagged, 75% noisy.
+- Deterministic and debuggable — you can explain every ranking.
+
+**Disadvantages**
+- Vocabulary-bound: no understanding of paraphrase or synonyms.
+- Needs reasonably rich card documents to score against.
+
+**Use when:** tag-rich / keyword tasks, or as one leg of a hybrid.
+**Avoid when:** heavily paraphrased or sparse-metadata workloads.
+
+---
+
+### 4.6 semantic (dense embeddings — from the research)
+
+**How it works:** embeds every card document once at startup (fastembed,
+all-MiniLM-L6-v2, offline); per task, embeds the request and picks the card
+with the highest cosine similarity — the vector-retrieval approach of the MCP
+semantic tool discovery paper and Tool-to-Agent Retrieval.
+**Selection:** cosine(task_vector, card_vector), take the top.
+**When it misses:** content-heavy tasks whose *topic* words outvote the *action*
+words (well-tagged 75%), and noisy tasks where a wrong-agent keyword pulls the
+vector toward the wrong card (58%).
+
+**Advantages**
+- Understands paraphrase and semantics, not just vocabulary (75% paraphrased vs
+  33% lexical).
+- No tag vocabulary to maintain; generalizes to unseen phrasing.
+- Offline and local with a small embedding model.
+
+**Disadvantages**
+- **Slowest selection** (~30–66 ms local, embedding per request) unless you
+  cache query vectors or use a vector DB + ANN.
+- Needs an embedding model dependency (~90 MB model).
+- Weakest on keyword-rich and noisy tasks — embeddings ignore the exact-tag
+  signal that lexical methods exploit.
+
+**Use when:** paraphrased tasks, sparse metadata, or semantic generalization
+matters more than latency.
+**Avoid when:** tight latency budgets or exact-keyword workloads.
+
+---
+
+### 4.7 hybrid (BM25 + semantic via Reciprocal Rank Fusion — from the research)
+
+**How it works:** runs BM25 and the dense embedder, then fuses both ranked
+lists with Reciprocal Rank Fusion (RRF, k=60) — the hybrid-retrieval recipe
+from Tool-to-Agent Retrieval / Agent-as-a-Graph.
+**Selection:** RRF(rank_bm25, rank_dense), take the top.
+**When it misses:** rarely — it inherits both methods' blind spots only when
+both fail together (worst regime tested: 83%, never below 75%).
+
+**Advantages**
+- **The only method ≥75% in every regime we tested** — the robust default.
+- Combines exact-keyword strength with paraphrase robustness.
+- Deterministic; no training, no LLM, no tokens.
+
+**Disadvantages**
+- Costs the most of the non-LLM methods per selection (~40–76 ms: two
+  embeddings + BM25 + fusion) — still far cheaper than an LLM router.
+- Two moving parts to tune (BM25 params, fusion k, weights).
+
+**Use when:** you don't know the workload, or it mixes tag-rich and paraphrased
+requests — i.e., most real systems.
+**Avoid when:** you have a hard latency budget and a known keyword-heavy
+workload (plain BM25/card is cheaper), or you're willing to pay tokens for
+deep semantics (LLM).
+
+---
+
+### 4.8 llm_reasoned (LLM selection)
 
 **How it works:** gathers the same discovered cards, then asks a free LLM
 (Ollama / any OpenAI-compatible endpoint) to pick the best agent for the task;
@@ -222,7 +335,7 @@ it is a **silent misroute**:
   roster → the Master routes to a wrong agent with **no error, no fallback, no
   log**. `errors=0`, accuracy 0%.
 
-None of the five methods detects a vanished agent on its own. Whatever method
+None of the methods detects a vanished agent on its own. Whatever method
 you choose, add **liveness / roster-completeness monitoring** and a
 **skill-aware fallback** (fall back to the next agent that actually fits the
 task, not just "next in the list").
@@ -232,12 +345,15 @@ task, not just "next in the list").
 ## 6. Rule-of-thumb summary
 
 ```
-small fixed fleet          -> static
-small/medium dynamic fleet -> card_discovery          (simplest real discovery)
-large / governed fleet     -> registry_skill           (source of truth + search)
-fast + governed            -> registry_skill + cached  (both worlds)
-fuzzy / sparse tags        -> llm_reasoned             (semantics, pay tokens)
-production                 -> any of the above + fallback + liveness monitoring
+tag-rich / exact keywords   -> bm25 or card_discovery     (cheapest accurate)
+paraphrased / no vocabulary -> semantic                    (semantics, +latency)
+noisy / unknown workload    -> hybrid (BM25+semantic RRF)  (robust everywhere)
+small fixed fleet           -> static
+small/medium dynamic fleet  -> card_discovery              (simplest real discovery)
+large / governed fleet      -> registry_skill              (source of truth + search)
+fast + governed             -> registry_skill + cached     (both worlds)
+deeply fuzzy / sparse tags  -> llm_reasoned                (semantics, pay tokens)
+production                  -> any of the above + fallback + liveness monitoring
 ```
 
 Full measurements, methodology, and experiment ladder:

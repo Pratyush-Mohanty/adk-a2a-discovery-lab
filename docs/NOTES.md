@@ -122,6 +122,49 @@ tasks are fuzzy or descriptions are noisy. See `docs/adk_demo` for the ADK
    fallback. Monitor roster completeness, not just call success.
 6. **LLM routing buys semantics at real cost** (tokens, latency). Use it where
    tag-based scoring is brittle, not for well-structured fleets.
+7. **No single discovery method dominates** — the use-case matrix (new) proves
+   it: each method has a regime where it wins, matching the "no single router
+   dominates" finding in the LLM-routing literature (LLMRouterBench).
+
+## Research-backed discovery methods (added)
+
+Surveyed the agent-discovery / tool-retrieval literature and implemented the
+methods that are (a) offline, (b) dependency-light, (c) comparable in our lab:
+
+| paper / work | idea | implemented as |
+|---|---|---|
+| Tool-to-Agent Retrieval, Agent-as-a-Graph (arXiv 2511.01854, 2511.18194) | BM25 sparse baseline over tool/agent descriptions | `bm25` |
+| Semantic Tool Discovery for MCP (arXiv 2603.20313) | vector embeddings of tool docs + cosine retrieval | `semantic` (fastembed, all-MiniLM-L6-v2, offline) |
+| Tool-to-Agent Retrieval / Agent-as-a-Graph | hybrid lexical + dense with rank fusion | `hybrid` (Reciprocal Rank Fusion of BM25 + cosine) |
+| RouteLLM (arXiv 2406.18665) | similarity-weighted ranking / learned routers | conceptual: semantic ≈ SW-ranking; MF/BERT need training data → out of scope |
+| ANS / ACNBP / DNS-style registries (arXiv 2505.10609, 2506.13590) | capability-aware naming + registry | already covered by `registry_skill` |
+| DHT + Gossip discovery (AIOS, arXiv 2504.14411) | decentralized P2P discovery | infra-heavy → documented, not built |
+| BiRouter / GraphRouter / HYSET | learned scoring / graph / set-level routing | need training/supervision → out of scope |
+
+Implementation: `discovery_lab/strategies.py` (BM25Index, SemanticStrategy,
+HybridStrategy), `discovery_lab/usecases.py` (strategy x use-case matrix),
+`discovery_lab/config.py` (`TASK_SETS`).
+
+### Use-case matrix (accuracy %, 12 tasks per cell)
+
+| task set | static | card_discovery | bm25 | semantic | hybrid |
+|---|---|---|---|---|---|
+| well_tagged | 100 | 100 | 92 | 75 | 83 |
+| paraphrased | 33 | 33 | 33 | **75** | **83** |
+| noisy | 58 | 58 | **75** | 58 | **75** |
+
+- well_tagged (tags match the text) → keyword/tag methods win; **embeddings
+  are the weakest** (75%) and the slowest (+30–66 ms selection).
+- paraphrased (no shared vocabulary, no tag) → **semantic 75% / hybrid 83%**
+  beat lexical 33%; embeddings earn their latency here.
+- noisy (distractor keywords from wrong agents) → **bm25 & hybrid 75%**;
+  embeddings alone drop to 58%.
+- **hybrid is the only method that is ≥75% in every regime** → the robust
+  default, mirroring the "hybrid retrieval with rank fusion" recommendation in
+  the tool-retrieval papers.
+
+Charts: `experiments/accuracy_by_usecase.png`, `selection_by_usecase.png`,
+`tokens_by_usecase.png`.
 
 ## Limitations / next steps
 

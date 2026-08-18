@@ -5,3 +5,5 @@ fastapi>=0.110
 uvicorn>=0.29
 matplotlib>=3.8
 numpy>=1.26
+# Dense-embedding semantic strategy (research-backed methods)
+fastembed>=0.8

@@ -370,6 +370,57 @@ latency difference between the methods.
 
 ---
 
+### 6.4 Research-backed methods & the use-case matrix
+
+We then surveyed the agent-discovery / tool-retrieval literature and
+implemented three more methods in the same harness (offline, dependency-light,
+directly comparable):
+
+| source | method implemented |
+|---|---|
+| Tool-to-Agent Retrieval, Agent-as-a-Graph (arXiv 2511.01854, 2511.18194) | **bm25** — Okapi BM25 over card documents (sparse lexical baseline) |
+| Semantic Tool Discovery for MCP (arXiv 2603.20313) | **semantic** — dense embeddings (fastembed, all-MiniLM-L6-v2) + cosine |
+| Tool-to-Agent Retrieval / Agent-as-a-Graph | **hybrid** — BM25 + semantic fused with Reciprocal Rank Fusion (k=60) |
+| RouteLLM (arXiv 2406.18665) | conceptual only (SW-ranking ≈ semantic; MF/BERT need training data) |
+| ANS / ACNBP (arXiv 2505.10609, 2506.13590) | already covered by `registry_skill` (capability-aware registry) |
+| AIOS DHT+Gossip (arXiv 2504.14411) | documented, not built (P2P infra-heavy) |
+| BiRouter / GraphRouter / HYSET | out of scope (learned scoring / supervision) |
+
+To stress-test the "accuracy is a tie" claim we built three **task sets** in
+`discovery_lab/config.py` (`TASK_SETS`) — `well_tagged` (the original 12
+tasks), `paraphrased` (same intents, reworded with **no shared vocabulary and
+no usable tag** — the "user requests rarely align with the tag vocabulary"
+point from ToolDreamer), and `noisy` (compound tasks whose text contains
+distractor keywords from the wrong agents). Every strategy ran all 36 tasks.
+
+**Measured matrix (accuracy %, 12 tasks per cell):**
+
+| task set | static | card_discovery | bm25 | semantic | hybrid |
+|---|---|---|---|---|---|
+| well_tagged | **100** | **100** | 92 | 75 | 83 |
+| paraphrased | 33 | 33 | 33 | **75** | **83** |
+| noisy | 58 | 58 | **75** | 58 | **75** |
+
+Readings:
+
+1. **Tags that match the text → lexical wins.** On well-tagged tasks BM25 and
+   card discovery are the cheapest accurate methods; embeddings are the
+   *weakest* (75%) and the slowest (+30–66 ms selection). Don't pay for
+   semantics when your tasks are keyword-y.
+2. **Paraphrased requests → semantics win.** All three lexical methods collapse
+   to 33% (random with 4 agents); semantic reaches 75%, hybrid 83%. This is
+   where embedding latency and LLM tokens are actually justified.
+3. **Noisy tasks → hybrid is king.** Dense-only drops to 58% (a distractor
+   keyword pulls the vector toward the wrong agent); BM25 and hybrid hold 75%.
+   **Hybrid is the only method ≥75% in every regime** — the robust default.
+4. This mirrors the literature: Tool-to-Agent Retrieval / Agent-as-a-Graph
+   report hybrid lexical+dense with rank fusion beating either alone, and
+   LLMRouterBench finds **no single router dominates** — the best method
+   depends on the workload.
+
+Charts: `experiments/accuracy_by_usecase.png`,
+`experiments/selection_by_usecase.png`, `experiments/tokens_by_usecase.png`.
+
 ## 7. Learning points
 
 ### 7.1 Design lessons (the answers)
