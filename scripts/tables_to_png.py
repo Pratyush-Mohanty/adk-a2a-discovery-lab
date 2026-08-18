@@ -2,6 +2,9 @@
 
 Outputs PNGs into docs/medium_assets so each table can be pasted into
 Medium separately (Medium mangles pasted markdown tables).
+
+The renderer auto-fits: it measures each cell's *real rendered* text width
+against its column width and rebalances columns until no text overflows.
 """
 import re
 import shutil
@@ -11,12 +14,16 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 ROOT = Path(__file__).resolve().parent.parent
 MD = ROOT / "docs" / "MEDIUM_ARTICLE.md"
 OUT = ROOT / "docs" / "medium_assets"
 
 SEP = re.compile(r"^\s*\|?[\s:\-|]+\|?\s*$")
+
+FONT_PT = 10.5
+ROW_PT = 16.5
 
 
 def clean(cell: str) -> str:
@@ -48,32 +55,23 @@ def parse_tables(text: str):
     return tables
 
 
-def wrap(text: str, width: int) -> str:
-    words = text.split()
-    if not words:
-        return ""
-    lines, cur = [], ""
-    for w in words:
-        if len(cur) + len(w) + 1 <= width:
-            cur = f"{cur} {w}".strip()
-        else:
-            lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
-    return "\n".join(lines)
+CHAR_W = 6.6        # pts per char, seed only (real widths are measured)
+CHAR_W_BOLD = 7.4
 
 
-CHAR_W = 6.9        # avg char width (pts) at fontsize 11
-CHAR_W_BOLD = 7.7   # avg char width for bold header text
-ROW_PT = 16.0       # row height (pts) after vertical scale
-
-
-def wrap_pt(text: str, width_pt: float, char_w: float) -> int:
-    """Greedy word-wrap so each line's estimated width fits width_pt."""
+def wrap_pt(text: str, width_pt: float, char_w: float):
+    """Word-wrap text so each line fits width_pt; hard-breaks long words."""
     lines = []
     cur = ""
     for word in text.split():
+        # hard-break words that are longer than the whole budget
+        while len(word) * char_w > width_pt:
+            if cur:
+                lines.append(cur)
+                cur = ""
+            take = max(1, int(width_pt / char_w) - 1)
+            lines.append(word[:take])
+            word = word[take:]
         trial = f"{cur} {word}".strip()
         if len(trial) * char_w <= width_pt:
             cur = trial
@@ -83,7 +81,29 @@ def wrap_pt(text: str, width_pt: float, char_w: float) -> int:
             cur = word
     if cur:
         lines.append(cur)
-    return "\n".join(lines), len(lines)
+    return "\n".join(lines)
+
+
+def wrap_all(header, data, col_pt, font_pt):
+    header_wrapped = []
+    header_lines = 0
+    for c, h in enumerate(header):
+        txt = wrap_pt(h, col_pt[c] * 0.8, CHAR_W_BOLD * font_pt / 11.0)
+        header_wrapped.append(txt)
+        header_lines = max(header_lines, txt.count("\n") + 1)
+
+    rows_wrapped = []
+    body_lines = []
+    for r in data:
+        wrapped = []
+        nlines = 0
+        for c, cell in enumerate(r):
+            txt = wrap_pt(cell, col_pt[c] * 0.8, CHAR_W * font_pt / 11.0)
+            wrapped.append(txt)
+            nlines = max(nlines, txt.count("\n") + 1)
+        rows_wrapped.append(wrapped)
+        body_lines.append(nlines)
+    return header_wrapped, rows_wrapped, header_lines, body_lines
 
 
 def render(rows, title: str, out_path: Path):
@@ -92,36 +112,73 @@ def render(rows, title: str, out_path: Path):
     ncols = len(header)
     nrows = len(data)
 
-    natural = []
-    for c, h in enumerate(header):
-        longest = max([len(r[c]) for r in data] + [len(h)])
-        natural.append(longest + 3)
+    natural = [
+        max([len(r[c]) for r in data] + [len(header[c])]) + 3 for c in range(ncols)
+    ]
+    weights = [max(n, 10) for n in natural]
 
     figw_in = min(14.0, max(7.0, ncols * 2.9))
+
+    header_wrapped = rows_wrapped = None
+    header_lines = body_lines = None
+    col_pt = None
+
+    for attempt in range(8):
+        total_pt = figw_in * 72.0
+        col_pt = [total_pt * w / sum(weights) for w in weights]
+
+        header_wrapped, rows_wrapped, header_lines, body_lines = wrap_all(
+            header, data, col_pt, FONT_PT
+        )
+
+        total_rows = header_lines + sum(body_lines)
+        figh_in = 0.9 + total_rows * ROW_PT / 72.0
+
+        fig, ax = plt.subplots(figsize=(figw_in, figh_in))
+        ax.axis("off")
+        table = ax.table(
+            cellText=rows_wrapped,
+            colLabels=header_wrapped,
+            colWidths=[w / sum(weights) for w in weights],
+            loc="center",
+            cellLoc="left",
+            colLoc="left",
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(FONT_PT)
+        table.scale(1, 1.6)
+        fig.canvas.draw()
+        renderer = FigureCanvasAgg(fig).get_renderer()
+
+        worst_ratio = 0.0
+        worst_col = -1
+        for (r, c), cell in table.get_celld().items():
+            cell_w = cell.get_window_extent(renderer).width
+            txt = cell.get_texts()[0]
+            text_w = txt.get_window_extent(renderer).width
+            if cell_w > 0:
+                ratio = text_w / (cell_w * 0.96)
+                if ratio > worst_ratio:
+                    worst_ratio = ratio
+                    worst_col = c
+
+        plt.close(fig)
+
+        if worst_ratio <= 1.0 or worst_col < 0:
+            break
+
+        # grow the offending column; cap width growth
+        weights[worst_col] = min(int(weights[worst_col] * worst_ratio * 1.2) + 2, 300)
+
+    if worst_ratio > 1.0:
+        print(f"  warning: best fit for {title}: ratio {worst_ratio:.2f} (col {worst_col})")
+
+    # final render with fitted widths
     total_pt = figw_in * 72.0
-    weights = [max(n, 10) for n in natural]
     col_pt = [total_pt * w / sum(weights) for w in weights]
-    col_frac = [w / sum(weights) for w in weights]
-
-    header_wrapped = []
-    header_lines = 0
-    for c, h in enumerate(header):
-        txt, n = wrap_pt(h, col_pt[c] * 0.88, CHAR_W_BOLD)
-        header_wrapped.append(txt)
-        header_lines = max(header_lines, n)
-
-    rows_wrapped = []
-    body_lines = []
-    for r in data:
-        wrapped = []
-        nlines = 0
-        for c, cell in enumerate(r):
-            txt, n = wrap_pt(cell, col_pt[c] * 0.88, CHAR_W)
-            wrapped.append(txt)
-            nlines = max(nlines, n)
-        rows_wrapped.append(wrapped)
-        body_lines.append(nlines)
-
+    header_wrapped, rows_wrapped, header_lines, body_lines = wrap_all(
+        header, data, col_pt, FONT_PT
+    )
     total_rows = header_lines + sum(body_lines)
     figh_in = 0.9 + total_rows * ROW_PT / 72.0
 
@@ -132,14 +189,14 @@ def render(rows, title: str, out_path: Path):
     table = ax.table(
         cellText=rows_wrapped,
         colLabels=header_wrapped,
-        colWidths=col_frac,
+        colWidths=[w / sum(weights) for w in weights],
         loc="center",
         cellLoc="left",
         colLoc="left",
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(11)
-    table.scale(1, 1.7)
+    table.set_fontsize(FONT_PT)
+    table.scale(1, 1.6)
 
     for (r, c), cell in table.get_celld().items():
         cell.set_edgecolor("#c9d3e0")
