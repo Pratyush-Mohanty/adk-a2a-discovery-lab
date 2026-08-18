@@ -16,6 +16,9 @@ from matplotlib import font_manager
 from matplotlib.patches import FancyBboxPatch, Circle, FancyArrowPatch, Ellipse
 
 OUT = "docs/medium_assets/cover.png"
+OUT_SVG = "docs/medium_assets/cover.svg"
+
+matplotlib.rcParams["svg.fonttype"] = "none"  # keep text as editable SVG text
 
 FONTS = {f.name for f in font_manager.fontManager.ttflist}
 COMIC = "Comic Sans MS" if "Comic Sans MS" in FONTS else "DejaVu Sans"
@@ -120,5 +123,7 @@ for cx, *_ in agents:
     )
 
 plt.savefig(OUT, dpi=200, bbox_inches="tight", facecolor="white")
+plt.savefig(OUT_SVG, bbox_inches="tight", facecolor="white")
 plt.close(fig)
 print(f"cover image written: {OUT}")
+print(f"cover svg written: {OUT_SVG}")
