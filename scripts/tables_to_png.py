@@ -59,6 +59,13 @@ CHAR_W = 6.6        # pts per char, seed only (real widths are measured)
 CHAR_W_BOLD = 7.4
 
 
+def _cell_text(cell):
+    try:
+        return cell.get_texts()[0]
+    except AttributeError:
+        return cell.get_text()
+
+
 def wrap_pt(text: str, width_pt: float, char_w: float):
     """Word-wrap text so each line fits width_pt; hard-breaks long words."""
     lines = []
@@ -154,7 +161,7 @@ def render(rows, title: str, out_path: Path):
         worst_col = -1
         for (r, c), cell in table.get_celld().items():
             cell_w = cell.get_window_extent(renderer).width
-            txt = cell.get_texts()[0]
+            txt = _cell_text(cell)
             text_w = txt.get_window_extent(renderer).width
             if cell_w > 0:
                 ratio = text_w / (cell_w * 0.96)
