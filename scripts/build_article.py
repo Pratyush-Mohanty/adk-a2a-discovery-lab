@@ -161,7 +161,7 @@ def main() -> None:
 
     md_path = Path(args.md).resolve()
     out_path = Path(args.html).resolve()
-    base_dir = Path(__file__).resolve().parent.parent
+    base_dir = md_path.parent
 
     raw = md_path.read_text(encoding="utf-8")
     body = markdown.markdown(

@@ -163,8 +163,8 @@ HybridStrategy), `discovery_lab/usecases.py` (strategy x use-case matrix),
   default, mirroring the "hybrid retrieval with rank fusion" recommendation in
   the tool-retrieval papers.
 
-Charts: `experiments/accuracy_by_usecase.png`, `selection_by_usecase.png`,
-`tokens_by_usecase.png`.
+Charts: `../experiments/accuracy_by_usecase.png`, `../experiments/selection_by_usecase.png`,
+`../experiments/tokens_by_usecase.png`.
 
 ## Limitations / next steps
 

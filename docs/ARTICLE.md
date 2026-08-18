@@ -22,7 +22,7 @@ and behavior under failure.
 The headline: **on a well-tagged fleet, accuracy is a tie (100% for every
 method), so the winner is decided by cost — and cached card discovery wins.**
 
-![Architecture of the lab: a Master agent with five discovery strategies routing to four skill workers via their Agent Cards or a directory.](experiments/architecture.png)
+![Architecture of the lab: a Master agent with five discovery strategies routing to four skill workers via their Agent Cards or a directory.](../experiments/architecture.png)
 
 ---
 
@@ -211,11 +211,11 @@ We ran eight scenarios: the five strategies plus three failure drills.
 - **ex5c agent recovered** → back to 100%
 - **ex6 llm_reasoned** → 100%, 2,266 tokens
 
-![Routing accuracy per experiment: 100% everywhere except the two failure scenarios.](experiments/accuracy.png)
+![Routing accuracy per experiment: 100% everywhere except the two failure scenarios.](../experiments/accuracy.png)
 
-![End-to-end latency per experiment, dominated by the registry's per-request lookup and the 2.1 s dead-agent route.](experiments/latency.png)
+![End-to-end latency per experiment, dominated by the registry's per-request lookup and the 2.1 s dead-agent route.](../experiments/latency.png)
 
-![Token usage: only the LLM strategy spends any.](experiments/tokens.png)
+![Token usage: only the LLM strategy spends any.](../experiments/tokens.png)
 
 ## When 100% is not guaranteed — where the methods split
 
@@ -250,7 +250,7 @@ We didn't just speculate — we turned the "when" into an experiment. Three task
 sets (well-tagged, paraphrased, noisy) × every method = a 15-cell accuracy
 matrix, run on the real fleet:
 
-![Accuracy by use case: keyword methods win when tags match the text; semantic and hybrid win when the request is paraphrased; hybrid is the only method that stays >= 75% everywhere.](experiments/accuracy_by_usecase.png)
+![Accuracy by use case: keyword methods win when tags match the text; semantic and hybrid win when the request is paraphrased; hybrid is the only method that stays >= 75% everywhere.](../experiments/accuracy_by_usecase.png)
 
 | task set | static | card_discovery | bm25 | semantic | hybrid |
 |---|---|---|---|---|---|

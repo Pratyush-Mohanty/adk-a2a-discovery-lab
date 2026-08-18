@@ -418,8 +418,8 @@ Readings:
    LLMRouterBench finds **no single router dominates** — the best method
    depends on the workload.
 
-Charts: `experiments/accuracy_by_usecase.png`,
-`experiments/selection_by_usecase.png`, `experiments/tokens_by_usecase.png`.
+Charts: `../experiments/accuracy_by_usecase.png`,
+`../experiments/selection_by_usecase.png`, `../experiments/tokens_by_usecase.png`.
 
 ## 7. Learning points
 

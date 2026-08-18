@@ -90,8 +90,8 @@ ties, the cheap winner wins; when it doesn't, the LLM earns its tokens.**
   lexical+dense with rank fusion beating either alone, and LLMRouterBench
   reports no single router dominates.
 
-Charts: `experiments/accuracy_by_usecase.png`, `selection_by_usecase.png`,
-`tokens_by_usecase.png`.
+Charts: `../experiments/accuracy_by_usecase.png`, `../experiments/selection_by_usecase.png`,
+`../experiments/tokens_by_usecase.png`.
 
 ---
 
