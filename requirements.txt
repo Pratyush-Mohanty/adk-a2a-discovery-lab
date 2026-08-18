@@ -7,3 +7,5 @@ matplotlib>=3.8
 numpy>=1.26
 # Dense-embedding semantic strategy (research-backed methods)
 fastembed>=0.8
+# SVG -> PNG cover conversion (scripts/svg_to_png.py)
+resvg-py>=1.0
