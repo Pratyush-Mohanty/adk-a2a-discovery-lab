@@ -1,76 +1,146 @@
 """Generate the Medium cover image for the agent-routing article.
 
-Medium cover ratio ~1.91:1 (1400x800 minimum; we render 3200x1680).
+Simple, artistic, cartoon-style: pastel palette, hand-drawn-ish rounded
+robots, playful Comic Sans typography. Medium cover ratio ~1.91:1
+(rendered 3200x1680).
 """
 import matplotlib
 
 matplotlib.use("Agg")
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch
+from matplotlib import font_manager
+from matplotlib.patches import FancyBboxPatch, Circle, FancyArrowPatch, Ellipse
 
 OUT = "docs/medium_assets/cover.png"
+
+FONTS = {f.name for f in font_manager.fontManager.ttflist}
+COMIC = "Comic Sans MS" if "Comic Sans MS" in FONTS else "DejaVu Sans"
+HAND = "Segoe Print" if "Segoe Print" in FONTS else COMIC
+
+# pastel palette
+CREAM = "#fdf6ec"
+PEACH = "#ffd6a5"
+LAVENDER = "#bdb2ff"
+SKY = "#a0c4ff"
+MINT = "#caffbf"
+PINK = "#ffc6ff"
+INK = "#5b4a6e"
+LILAC = "#8a7fc0"
 
 fig, ax = plt.subplots(figsize=(16, 8.4), dpi=200)
 ax.set_xlim(0, 16)
 ax.set_ylim(0, 8.4)
 ax.axis("off")
 
-# soft vertical gradient background
-grad = np.linspace(0.94, 0.86, 256).reshape(-1, 1)
-bg = np.ones((256, 1, 3)) * 1.0
-bg[..., 0] *= grad
-bg[..., 1] *= grad
-bg[..., 2] *= grad + (1 - grad) * 0.06
+# soft vertical wash
+grad = np.linspace(1.0, 0.94, 256).reshape(-1, 1)
+bg = np.stack([grad, grad * 0.985, grad * 0.95], axis=-1)
 ax.imshow(bg, extent=(0, 16, 0, 8.4), aspect="auto", zorder=0)
 
-NAVY = "#1f3b73"
-TEAL = "#2e6b2e"
-ORANGE = "#b2572c"
-LIGHT = "#dfe7f5"
+# floating pastel dots / bubbles (artistic confetti)
+rng = np.random.default_rng(7)
+for _ in range(34):
+    x, y = rng.uniform(0.4, 15.6), rng.uniform(0.3, 8.0)
+    r = rng.uniform(0.05, 0.22)
+    c = rng.choice([PEACH, LAVENDER, SKY, MINT, PINK])
+    ax.add_patch(Circle((x, y), r, fc=c, ec="none", alpha=0.55, zorder=1))
 
 
-def box(x, y, w, h, text, fc, ec, fs, tc="#111111", bold=False):
-    p = FancyBboxPatch(
-        (x, y), w, h, boxstyle="round,pad=0.08",
-        fc=fc, ec=ec, lw=1.6, mutation_scale=16,
+def shadow(cx, cy, rx, ry):
+    ax.add_patch(Ellipse((cx, cy), rx, ry, fc="#000000", ec="none", alpha=0.06, zorder=1))
+
+
+def robot(cx, cy, s, body, face):
+    """A simple chibi robot head + antenna + smile."""
+    shadow(cx, cy - 0.62 * s, 1.05 * s, 0.22 * s)
+    # antenna
+    ax.plot([cx, cx], [cy + 0.55 * s, cy + 0.95 * s], color=INK, lw=0.14 * s, solid_capstyle="round", zorder=2)
+    ax.add_patch(Circle((cx, cy + 1.02 * s), 0.13 * s, fc=INK, ec="none", zorder=2))
+    # head
+    ax.add_patch(
+        FancyBboxPatch(
+            (cx - 0.78 * s, cy - 0.55 * s), 1.56 * s, 1.1 * s,
+            boxstyle="round,pad=0.04,rounding_size=0.28", fc=body, ec=INK,
+            lw=0.11 * s, zorder=3,
+        )
     )
-    ax.add_patch(p)
-    ax.text(
-        x + w / 2, y + h / 2, text, ha="center", va="center",
-        fontsize=fs, color=tc, fontweight="bold" if bold else "normal",
-        linespacing=1.4,
+    # screen
+    ax.add_patch(
+        FancyBboxPatch(
+            (cx - 0.55 * s, cy - 0.35 * s), 1.10 * s, 0.7 * s,
+            boxstyle="round,pad=0.02,rounding_size=0.2", fc=face, ec="none", zorder=4,
+        )
     )
+    # eyes
+    for ex in (cx - 0.26 * s, cx + 0.26 * s):
+        ax.add_patch(Circle((ex, cy + 0.10 * s), 0.085 * s, fc=INK, ec="none", zorder=5))
+    # smile
+    ax.plot(
+        [cx - 0.20 * s, cx, cx + 0.20 * s], [cy - 0.18 * s, cy - 0.10 * s, cy - 0.18 * s],
+        color=INK, lw=0.07 * s, zorder=5, solid_capstyle="round",
+    )
+
+
+def bubble(cx, cy, w, h, text, fs):
+    """Rounded speech bubble with a tail."""
+    ax.add_patch(
+        FancyBboxPatch(
+            (cx - w / 2, cy - h / 2), w, h,
+            boxstyle="round,pad=0.06,rounding_size=0.35", fc="#ffffff", ec=INK,
+            lw=3, zorder=6,
+        )
+    )
+    ax.add_patch(
+        FancyArrowPatch(
+            (cx + 0.28 * w, cy - h / 2), (cx + 0.10 * w, cy - h / 2 - 0.42),
+            arrowstyle="-", color=INK, lw=3, zorder=6,
+        )
+    )
+    ax.text(cx, cy, text, ha="center", va="center", fontsize=fs,
+            color=INK, fontfamily=COMIC, fontweight="bold", zorder=7)
 
 
 # kicker
-ax.text(8, 7.35, "ADK  ·  A2A  ·  AGENT ROUTING", ha="center", va="center",
-        fontsize=13, color=ORANGE, fontweight="bold", zorder=3)
+ax.text(8, 7.75, "ADK  ·  A2A  ·  AGENT ROUTING", ha="center", va="center",
+        fontsize=14, color=LILAC, fontfamily=COMIC, fontweight="bold", zorder=3)
 
-# title (two lines)
-ax.text(8, 6.35, "How Does One AI Agent Know\nWhich Other AI Agent To Call?",
-        ha="center", va="center", fontsize=33, color=NAVY,
-        fontweight="bold", linespacing=1.25, zorder=3)
+# title
+ax.text(8, 6.95, "How Does One AI Agent Know\nWhich Other AI Agent To Call?",
+        ha="center", va="center", fontsize=32, color=INK,
+        fontfamily=COMIC, fontweight="bold", linespacing=1.2, zorder=3)
 
-# subtitle
-ax.text(8, 5.15, "A beginner-friendly, measurement-backed tour of 8 ways to route\n"
-        "tasks to the right AI assistant — and which one to pick for your situation.",
-        ha="center", va="center", fontsize=15, color="#555555", linespacing=1.5, zorder=3)
+# subtitle (handwritten accent)
+ax.text(8, 5.6, "a little field guide to routing tasks to the right assistant",
+        ha="center", va="center", fontsize=18, color="#8a7f98",
+        fontfamily=HAND, zorder=3)
 
-# routing diagram
-box(5.0, 4.0, 6.0, 0.85, "MASTER AGENT\nwho should handle this request?",
-    NAVY, NAVY, 13, "white", bold=True)
-for i, name in enumerate(["summarizer", "translator", "extractor", "classifier"]):
-    x = 1.6 + i * 3.55
-    box(x, 1.35, 2.7, 0.85, name, LIGHT, NAVY, 13, NAVY, bold=True)
-    ax.annotate(
-        "", xy=(x + 1.35, 2.2), xytext=(8, 4.0),
-        arrowprops=dict(arrowstyle="-|>", color=TEAL, lw=2.2),
+# master robot + its bubble
+robot(8, 3.6, 1.15, LAVENDER, "#e7e3ff")
+bubble(10.4, 4.4, 3.4, 1.15, "who handles this?", 16)
+
+# the four little agents
+agents = [
+    (2.2, "summarizer", PEACH, "#fff1dc"),
+    (6.0, "translator", SKY, "#e2edff"),
+    (10.0, "extractor", MINT, "#edffe6"),
+    (13.8, "classifier", PINK, "#ffe9ff"),
+]
+for cx, name, body, face in agents:
+    robot(cx, 1.35, 0.8, body, face)
+    ax.text(cx, 0.35, name, ha="center", va="center", fontsize=15,
+            color=INK, fontfamily=COMIC, fontweight="bold", zorder=3)
+
+# dashed routes from master to each agent
+for cx, *_ in agents:
+    ax.add_patch(
+        FancyArrowPatch(
+            (8.4, 2.55), (cx, 1.95),
+            connectionstyle="arc3,rad=0.18",
+            arrowstyle="-|>", color=INK, lw=2.2,
+            linestyle=(0, (4, 3)), zorder=2,
+        )
     )
-
-# footer tagline
-ax.text(8, 0.5, "Agent discovery: 8 strategies measured on a real A2A fleet",
-        ha="center", va="center", fontsize=13, color="#777777", zorder=3)
 
 plt.savefig(OUT, dpi=200, bbox_inches="tight", facecolor="white")
 plt.close(fig)
