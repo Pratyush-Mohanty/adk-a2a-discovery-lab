@@ -34,7 +34,12 @@ idea actually is.
 Think of an **agent** as a small AI-powered worker — an assistant with one
 narrow job. In my lab I made four of them, each with a different specialty:
 
-![The four assistants in the lab.](medium_assets/table_assistants.png)
+| assistant | its specialty |
+|---|---|
+| **The Summarizer** | reads a long text and gives you the short version |
+| **The Translator** | translates between English, Spanish, French, and Hindi |
+| **The Extractor** | pulls specific facts (names, dates, numbers) out of text |
+| **The Classifier** | decides a label for text: "is this urgent?", "is this positive or negative?", "what topic is this?" |
 
 On top of them sits a **Master** — the dispatcher. Its only job is to look at
 an incoming request ("summarize this article for me") and decide: *which of the
@@ -293,7 +298,16 @@ which kind of request?**"
 
 ### Layer 1: the ladder
 
-![Experiment ladder: what we measured.](medium_assets/table_ladder.png)
+| experiment | what it tested | what we measured |
+|---|---|---|
+| 1. static | the laminated map | 100% accurate, ~0.01 ms |
+| 2. card discovery | reading menus once | 100% accurate, ~0 ms |
+| 3. registry | the shared phone book | 100% accurate, but **~21 ms** per lookup |
+| 4. cached | sticky notes | 100% accurate, ~0.03 ms, 36/36 hits |
+| 5a. assistant asleep | request sent to a dead assistant | 0% accurate, 2.1 s wait, 3 fallbacks |
+| 5b. assistant vanished | dead assistant never on the menu | **0% accurate, and *zero* errors reported** |
+| 5c. assistant recovers | restart an assistant | back to 100% |
+| 6. LLM routing | the smart intern picks | 100% accurate, **2,266 tokens** |
 
 ![Routing accuracy per experiment: 100% everywhere except the two failure scenarios.](../experiments/accuracy.png)
 
@@ -339,7 +353,13 @@ Every method ran against all three. Here's the scoreboard:
 
 ![Accuracy by use case: keyword methods win when tags match the text; semantic and hybrid win when the request is paraphrased; hybrid is the only method that stays at or above 75% everywhere.](../experiments/accuracy_by_usecase.png)
 
-![Routing accuracy by request type.](medium_assets/table_matrix.png)
+| | neat requests | paraphrased | noisy |
+|---|---|---|---|
+| **static** (laminated map) | **100%** | 33% | 58% |
+| **card discovery** (read menus) | **100%** | 33% | 58% |
+| **BM25** (word-expert) | 92% | 33% | **75%** |
+| **semantic** (meaning-matcher) | 75% | **75%** | 58% |
+| **hybrid** (both experts) | 83% | **83%** | **75%** |
 
 (33% is a four-way coin flip, by the way — with four assistants, pure guessing
 is 25%, so 33% means "might as well not try.")
@@ -378,7 +398,17 @@ out to prove, and the measurements say it loud and clear.
 Okay, the practical part. Here's the short answer to the original question,
 turned into a decision table you can copy:
 
-![The cheat sheet: your situation to method.](medium_assets/table_cheatsheet.png)
+| your situation | use this | because |
+|---|---|---|
+| Tiny, permanent setup (demo/prototype) | **static** (or card discovery) | nothing to build, instant |
+| Small team that changes over time | **card discovery** | reads fresh descriptions once, ~free afterwards |
+| Users use your exact words | **BM25 or card discovery** | most accurate *and* cheapest when words match |
+| Users paraphrase, tags are messy | **semantic** | understands meaning, not just vocabulary |
+| You can't predict how users will phrase things | **hybrid (BM25 + semantic)** | the only method ≥75% in every test |
+| Big team, many groups, need central control | **registry** | one source of truth, searchable, governable |
+| Big team *and* you care about speed | **registry + cache** | phone book's benefits at sticky-note speed |
+| Genuinely fuzzy requests | **LLM routing** | real understanding — just pay for it |
+| Any production system | **any method + health checks + fallbacks** | no method can spot a vanished assistant |
 
 **And if you only have twenty seconds:**
 
